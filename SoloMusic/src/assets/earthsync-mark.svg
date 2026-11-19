@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none">
+  <g stroke="#000" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Globe silhouette -->
+    <circle cx="120" cy="120" r="116"/>
+    <!-- Latitude lines -->
+    <path d="M17.5 88.5C45 105 82 113 120 113s75-8 102.5-24.5"/>
+    <path d="M9.5 151.5C39 134 79 126.5 120 126.5s81 7.5 110.5 25"/>
+    <!-- Longitude meridians -->
+    <path d="M120 4C89 34 73 75 73 120s16 86 47 116"/>
+    <path d="M120 4c31 30 47 71 47 116s-16 86-47 116"/>
+    <!-- Restrained, abstract continent contours -->
+    <path d="M47 62l9-8 11 2 6-7 12 3 5 9-5 8-12 1-5 9-10-2-4-8-9 1z"/>
+    <path d="M76 91l10-7 13 3 7 10-4 13-8 7-2 15-8 11-7-8 1-13-8-9 2-13z"/>
+    <path d="M111 48l12-8 18 3 9 8-6 8-16 1-7 8-10-5z"/>
+    <path d="M145 82l10-7 13 3 7 8-5 8-12 1-6 8-10-4z"/>
+    <path d="M153 111l13-6 17 5 9 12-5 11-14 2-8 11-12-3-6-12z"/>
+    <path d="M139 148l13-5 13 7 4 14-7 12-4 20-10 13-8-7 1-18-8-13z"/>
+  </g>
+</svg>
