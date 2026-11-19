@@ -19,8 +19,9 @@ import { useAuth } from "@/lib/auth"
 
 type AuthResponse = {
   message: string
-  user: AuthUser
+  user: AuthUser | null
   isNewUser?: boolean
+  onboardingRequired?: boolean
 }
 
 function FieldError({ message }: { message?: string | undefined }) {
@@ -54,6 +55,20 @@ export function SignIn() {
     setFormError("Something went wrong. Please try again.")
   }
 
+  // Accounts that still need a date of birth and consents (including every new
+  // Google user) go to onboarding first, then on to where they wanted to go.
+  function goNext(onboardingRequired: boolean | undefined) {
+    if (onboardingRequired) {
+      navigate("/onboarding", {
+        replace: true,
+        state: { from: { pathname: redirectTo } },
+      })
+      return
+    }
+
+    navigate(redirectTo, { replace: true })
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -70,14 +85,14 @@ export function SignIn() {
     setFormError("")
 
     try {
-      await apiFetch<AuthResponse>("/auth/sign-in", {
+      const result = await apiFetch<AuthResponse>("/auth/sign-in", {
         method: "POST",
         body: { identifier, password },
       })
 
       // Update the shared auth state first so the protected route sees the user.
       await refresh()
-      navigate(redirectTo, { replace: true })
+      goNext(result.onboardingRequired)
     } catch (error) {
       showError(error)
     } finally {
@@ -96,14 +111,14 @@ export function SignIn() {
     setFormError("")
 
     try {
-      await apiFetch<AuthResponse>("/auth/google", {
+      const result = await apiFetch<AuthResponse>("/auth/google", {
         method: "POST",
         body: { credential },
       })
 
       // Update the shared auth state first so the protected route sees the user.
       await refresh()
-      navigate(redirectTo, { replace: true })
+      goNext(result.onboardingRequired)
     } catch (error) {
       showError(error)
     } finally {

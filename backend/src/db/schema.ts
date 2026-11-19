@@ -9,6 +9,7 @@ import {
     boolean,
     json,
     timestamp,
+    date,
     index,
     uniqueIndex,
     primaryKey,
@@ -78,6 +79,57 @@ export const profiles = pgTable(
             .$onUpdate(() => new Date()),
     },
     (t) => [index("profiles_visibility_idx").on(t.visibility)]
+)
+
+/* ------------------------------------------------------------------ */
+/* Account private data (never returned by any API)                    */
+/* ------------------------------------------------------------------ */
+
+// A row here means the user has finished onboarding (date of birth given).
+// Accounts that existed before this table have no row, which is how the
+// onboarding gate finds them. Always select explicit columns from this table;
+// never join it into an object that is sent to a client.
+export const accountPrivate = pgTable("account_private", {
+    userId: integer("user_id")
+        .primaryKey()
+        .references(() => users.id, { onDelete: "cascade" }),
+    dateOfBirth: date("date_of_birth", { mode: "string" }).notNull(), // "YYYY-MM-DD"
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+})
+
+/* ------------------------------------------------------------------ */
+/* Consents (record of what was accepted, and which version)           */
+/* ------------------------------------------------------------------ */
+
+// One kind per checkbox on the onboarding form:
+//   age_confirmation  "I confirm I'm 18 or older"
+//   terms_privacy     "I agree to the Terms of Service and Privacy Policy"
+// Current versions live in lib/consent.ts. Bumping a version there is what
+// sends everyone back through onboarding.
+export const consentKind = pgEnum("consent_kind", [
+    "age_confirmation",
+    "terms_privacy",
+])
+
+export const consents = pgTable(
+    "consents",
+    {
+        id: serial("id").primaryKey(),
+        userId: integer("user_id")
+            .notNull()
+            .references(() => users.id, { onDelete: "cascade" }),
+        kind: consentKind("kind").notNull(),
+        version: varchar("version", { length: 20 }).notNull(), // e.g. "2026-11-19"
+        acceptedAt: timestamp("accepted_at").defaultNow().notNull(),
+    },
+    (t) => [
+        // One acceptance per user per kind per version.
+        uniqueIndex("consents_user_kind_version_idx").on(
+            t.userId,
+            t.kind,
+            t.version
+        ),
+    ]
 )
 
 /* ------------------------------------------------------------------ */

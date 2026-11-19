@@ -1,6 +1,6 @@
 import { useState } from "react"
 import type { FormEvent } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { GoogleLogin } from "@react-oauth/google"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,11 +15,13 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch, ApiError, type AuthUser } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { dobSchema, isAdult } from "@/lib/dob"
 
 type AuthResponse = {
   message: string
-  user: AuthUser
+  user: AuthUser | null
   isNewUser?: boolean
+  onboardingRequired?: boolean
 }
 
 function FieldError({ message }: { message?: string | undefined }) {
@@ -28,6 +30,11 @@ function FieldError({ message }: { message?: string | undefined }) {
   }
 
   return <p className="text-sm text-destructive">{message}</p>
+}
+
+// Today as YYYY-MM-DD, so the date picker cannot select a future date.
+function todayString() {
+  return new Date().toISOString().slice(0, 10)
 }
 
 export function SignUp() {
@@ -62,10 +69,38 @@ export function SignUp() {
     const email = String(data.get("email") ?? "").trim()
     const password = String(data.get("password") ?? "")
     const confirmPassword = String(data.get("confirmPassword") ?? "")
+    const dateOfBirth = String(data.get("dateOfBirth") ?? "").trim()
+    const confirmedAdult = data.get("confirmedAdult") === "on"
+    const acceptedTerms = data.get("acceptedTerms") === "on"
+
+    // Quick checks for a fast response. The server repeats all of them.
+    const errors: Record<string, string> = {}
 
     if (password !== confirmPassword) {
+      errors.confirmPassword = "Passwords do not match"
+    }
+
+    const dobResult = dobSchema.safeParse(dateOfBirth)
+
+    if (!dobResult.success) {
+      errors.dateOfBirth =
+        dobResult.error.issues[0]?.message ?? "Enter a valid date of birth"
+    } else if (!isAdult(dobResult.data)) {
+      errors.dateOfBirth = "You must be 18 or older to create an account"
+    }
+
+    if (!confirmedAdult) {
+      errors.confirmedAdult = "You must confirm you are 18 or older"
+    }
+
+    if (!acceptedTerms) {
+      errors.acceptedTerms =
+        "You must accept the Terms of Service and Privacy Policy"
+    }
+
+    if (Object.keys(errors).length > 0) {
       setFormError("")
-      setFieldErrors({ confirmPassword: "Passwords do not match" })
+      setFieldErrors(errors)
       return
     }
 
@@ -76,7 +111,14 @@ export function SignUp() {
     try {
       await apiFetch<AuthResponse>("/auth/sign-up", {
         method: "POST",
-        body: { username, email, password },
+        body: {
+          username,
+          email,
+          password,
+          dateOfBirth,
+          confirmedAdult,
+          acceptedTerms,
+        },
       })
 
       // Update the shared auth state first so the protected route sees the user.
@@ -100,14 +142,19 @@ export function SignUp() {
     setFormError("")
 
     try {
-      await apiFetch<AuthResponse>("/auth/google", {
+      const result = await apiFetch<AuthResponse>("/auth/google", {
         method: "POST",
         body: { credential },
       })
 
       // Update the shared auth state first so the protected route sees the user.
       await refresh()
-      navigate("/dashboard", { replace: true })
+
+      // A new Google user has no account yet: onboarding collects the username,
+      // date of birth and consents, and creates it.
+      navigate(result.onboardingRequired ? "/onboarding" : "/dashboard", {
+        replace: true,
+      })
     } catch (error) {
       showError(error)
     } finally {
@@ -117,7 +164,7 @@ export function SignUp() {
 
   return (
     <div className="fixed inset-0 flex items-center justify-center p-4 pointer-events-none">
-      <Card className="w-full max-w-sm pointer-events-auto">
+      <Card className="w-full max-w-sm pointer-events-auto max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <CardHeader>
           <CardTitle>Create an account</CardTitle>
           <CardDescription>
@@ -177,6 +224,78 @@ export function SignUp() {
                   required
                 />
                 <FieldError message={fieldErrors.confirmPassword} />
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="date-of-birth">Date of birth</Label>
+                <Input
+                  id="date-of-birth"
+                  name="dateOfBirth"
+                  type="date"
+                  autoComplete="bday"
+                  min="1900-01-01"
+                  max={todayString()}
+                  aria-invalid={!!fieldErrors.dateOfBirth}
+                  required
+                />
+                <FieldError message={fieldErrors.dateOfBirth} />
+              </div>
+
+              <div className="grid gap-3">
+                <div className="grid gap-1">
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="confirmed-adult"
+                      name="confirmedAdult"
+                      type="checkbox"
+                      className="mt-0.5 size-4 shrink-0 accent-primary"
+                      aria-invalid={!!fieldErrors.confirmedAdult}
+                    />
+                    <Label
+                      htmlFor="confirmed-adult"
+                      className="text-sm font-normal leading-snug"
+                    >
+                      I confirm that I am 18 years of age or older
+                    </Label>
+                  </div>
+                  <FieldError message={fieldErrors.confirmedAdult} />
+                </div>
+
+                <div className="grid gap-1">
+                  <div className="flex items-start gap-2">
+                    <input
+                      id="accepted-terms"
+                      name="acceptedTerms"
+                      type="checkbox"
+                      className="mt-0.5 size-4 shrink-0 accent-primary"
+                      aria-invalid={!!fieldErrors.acceptedTerms}
+                    />
+                    <Label
+                      htmlFor="accepted-terms"
+                      className="text-sm font-normal leading-snug"
+                    >
+                      <span>
+                        I agree to the{" "}
+                        <Link
+                          to="/terms"
+                          target="_blank"
+                          className="underline underline-offset-4"
+                        >
+                          Terms of Service
+                        </Link>{" "}
+                        and{" "}
+                        <Link
+                          to="/privacy"
+                          target="_blank"
+                          className="underline underline-offset-4"
+                        >
+                          Privacy Policy
+                        </Link>
+                      </span>
+                    </Label>
+                  </div>
+                  <FieldError message={fieldErrors.acceptedTerms} />
+                </div>
               </div>
 
               {formError && (

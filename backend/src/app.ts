@@ -6,6 +6,7 @@ import authRouter from "./routes/auth.js";
 import dashboardRouter from "./routes/dashboard.js";
 import profileRouter from "./routes/profile.js";
 import { requireAuth } from "./middlewares/requireAuth.js";
+import { onboardingGate } from "./middlewares/onboardingGate.js";
 import { sessionMiddleware } from "./lib/session.js";
 import usersRouter from "./routes/users.js";
 import friendsRouter from "./routes/friends.js";
@@ -42,6 +43,13 @@ app.get("/health", (_req, res) => {
 
 // Register API routes (final URLs look like /api/auth/sign-in)
 app.use("/api", authRouter);
+
+// Everything below this line needs a finished onboarding (date of birth and
+// current consents). It must stay after authRouter: the onboarding endpoints
+// live there. Requests without a session pass through to each route's own
+// requireAuth.
+app.use("/api", onboardingGate);
+
 app.use("/api", profileRouter);
 
 app.use("/api/dashboard", requireAuth, dashboardRouter);

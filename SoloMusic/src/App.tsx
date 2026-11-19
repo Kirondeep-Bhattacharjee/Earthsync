@@ -5,6 +5,7 @@ import { GoogleOAuthProvider } from "@react-oauth/google"
 import Home from "./Pages/home"
 import { SignIn } from "./Pages/sign_in"
 import { SignUp } from "./Pages/sign_up"
+import { Onboarding } from "./Pages/onboarding"
 
 import { ThemeProvider } from "@/components/theme-provider"
 import { AuthProvider } from "@/lib/auth"
@@ -48,6 +49,8 @@ export function App() {
                 <Route path="/" element={<Home />} />
                 <Route path="/sign-in" element={<SignIn />} />
                 <Route path="/sign-up" element={<SignUp />} />
+                {/* Not protected: a new Google user has no account until this is done */}
+                <Route path="/onboarding" element={<Onboarding />} />
               </Route>
 
               {/* Protected pages: sidebar layout, no Navbar */}

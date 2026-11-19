@@ -10,15 +10,18 @@ export type AuthUser = {
 export class ApiError extends Error {
   status: number
   fieldErrors: Record<string, string>
+  code: string | undefined
 
   constructor(
     status: number,
     message: string,
-    fieldErrors: Record<string, string> = {}
+    fieldErrors: Record<string, string> = {},
+    code?: string | undefined
   ) {
     super(message)
     this.status = status
     this.fieldErrors = fieldErrors
+    this.code = code
   }
 }
 
@@ -72,10 +75,21 @@ export async function apiFetch<T>(
       fieldErrors[data.field] = data.message
     }
 
+    // The account has not finished onboarding (for example the Terms changed
+    // while the user was signed in): send them to the onboarding page.
+    if (
+      response.status === 403 &&
+      data.code === "ONBOARDING_REQUIRED" &&
+      window.location.pathname !== "/onboarding"
+    ) {
+      window.location.assign("/onboarding")
+    }
+
     throw new ApiError(
       response.status,
       data.message ?? "Something went wrong. Please try again.",
-      fieldErrors
+      fieldErrors,
+      typeof data.code === "string" ? data.code : undefined
     )
   }
 

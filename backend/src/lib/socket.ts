@@ -15,6 +15,7 @@ import {
 } from "./chat.js";
 import { sessionMiddleware, sessionStore } from "./session.js";
 import { usernameSchema } from "./username.js";
+import { getOnboardingStatus } from "./onboarding.js";
 
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
@@ -228,6 +229,15 @@ async function recheckSession(socket: ChatSocket) {
 
         if (!session || session.userId !== socket.userId) {
             socket.close(4401, "Signed out");
+            return;
+        }
+
+        // A consent version bump (or an account that never finished onboarding)
+        // closes sockets that were opened before it.
+        const onboarding = await getOnboardingStatus(socket.userId);
+
+        if (onboarding.required) {
+            socket.close(4403, "Onboarding required");
         }
     } catch (error) {
         console.error("Socket session recheck error:", error);
@@ -373,6 +383,15 @@ export function attachChatSocket(server: Server) {
 
             if (!auth) {
                 rejectUpgrade(socket, 401, "Unauthorized");
+                return;
+            }
+
+            // Same rule as the HTTP gate: no socket until the account has a date
+            // of birth and current consents.
+            const onboarding = await getOnboardingStatus(auth.userId);
+
+            if (onboarding.required) {
+                rejectUpgrade(socket, 403, "Forbidden");
                 return;
             }
 
