@@ -89,13 +89,17 @@ export const profiles = pgTable(
 // Accounts that existed before this table have no row, which is how the
 // onboarding gate finds them. Always select explicit columns from this table;
 // never join it into an object that is sent to a client.
-export const accountPrivate = pgTable("account_private", {
-    userId: integer("user_id")
-        .primaryKey()
-        .references(() => users.id, { onDelete: "cascade" }),
-    dateOfBirth: date("date_of_birth", { mode: "string" }).notNull(), // "YYYY-MM-DD"
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-})
+export const accountPrivate = pgTable(
+    "account_private",
+    {
+        userId: integer("user_id")
+            .primaryKey()
+            .references(() => users.id, { onDelete: "cascade" }),
+        dateOfBirth: date("date_of_birth", { mode: "string" }).notNull(), // "YYYY-MM-DD"
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+    },
+    (t) => [index("account_private_dob_idx").on(t.dateOfBirth)]
+)
 
 /* ------------------------------------------------------------------ */
 /* Consents (record of what was accepted, and which version)           */

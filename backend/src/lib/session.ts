@@ -1,6 +1,8 @@
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
-import pg from "pg";
+import { Pool, neonConfig } from "@neondatabase/serverless";
+import ws from "ws";
+import type { Pool as PgPool } from "pg";
 
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
@@ -28,15 +30,26 @@ const isProduction = process.env.NODE_ENV === "production";
 /* Store                                                               */
 /* ------------------------------------------------------------------ */
 
+// Node needs a WebSocket implementation for the Neon driver (also set in
+// db/index.ts; setting it twice is harmless).
+neonConfig.webSocketConstructor = ws;
+
 const PgSession = connectPgSimple(session);
 
-// A small dedicated pool: sessions are simple queries, so a plain TCP
-// connection works and keeps the Neon WebSocket driver out of it.
-const pool = new pg.Pool({ connectionString, max: 5 });
+// Same transport as the Drizzle queries: WebSocket over port 443. A raw `pg`
+// pool uses TCP port 5432, which many networks (college, office, hotel,
+// hotspots) block, so sign-in timed out there.
+const pool = new Pool({ connectionString, max: 5 });
+
+// An idle connection that drops would otherwise crash the process.
+pool.on("error", (error: Error) => {
+    console.error("Session pool error:", error);
+});
 
 // Exported so the WebSocket server can look up a session from its cookie later.
 export const sessionStore = new PgSession({
-    pool,
+    // Neon's Pool behaves like a pg Pool; only the type differs.
+    pool: pool as unknown as PgPool,
     tableName: "session", // created by the Drizzle migration, see db/schema.ts
     // Seconds between cleanups of expired rows. Kept long so an idle Neon
     // database isn't woken up every few minutes just for housekeeping.

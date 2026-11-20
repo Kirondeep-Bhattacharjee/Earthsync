@@ -1,17 +1,8 @@
 import { useState } from "react"
 import type { FormEvent } from "react"
-import { useLocation, useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { GoogleLogin } from "@react-oauth/google"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch, ApiError, type AuthUser } from "@/lib/api"
@@ -127,22 +118,23 @@ export function SignIn() {
   }
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center p-4 pointer-events-none">
-      <Card className="w-full max-w-sm pointer-events-auto">
-        <CardHeader>
-          <CardTitle>Login to your account</CardTitle>
-          <CardDescription>
-            Enter your email or username below to login to your account
-          </CardDescription>
-          <CardAction>
-            <Button variant="link" onClick={() => navigate("/sign-up")}>
-              Sign Up
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent>
+    // Fills the space under the Navbar (the parent <main> is a flex column).
+    <div className="grid min-h-0 w-full flex-1 lg:grid-cols-2">
+      {/* Left: the form */}
+      <div className="flex items-center justify-center px-6 py-6 md:px-10">
+        <div className="w-full max-w-sm">
+          <div className="mb-6 flex flex-col items-center gap-1 text-center">
+            <h1 className="text-2xl font-bold">Login to your account</h1>
+            <p className="text-sm text-muted-foreground">
+              Don&apos;t have an account?{" "}
+              <Link to="/sign-up" className="underline underline-offset-4">
+                Sign up
+              </Link>
+            </p>
+          </div>
+
           <form id="signin-form" onSubmit={handleSubmit}>
-            <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-5">
               <div className="grid gap-2">
                 <Label htmlFor="identifier">Email or username</Label>
                 <Input
@@ -156,6 +148,7 @@ export function SignIn() {
                 />
                 <FieldError message={fieldErrors.identifier} />
               </div>
+
               <div className="grid gap-2">
                 <div className="flex items-center">
                   <Label htmlFor="password">Password</Label>
@@ -182,19 +175,21 @@ export function SignIn() {
                   {formError}
                 </p>
               )}
+
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? "Logging in..." : "Login"}
+              </Button>
             </div>
           </form>
-        </CardContent>
-        <CardFooter className="flex-col gap-2">
-          {/* Outside the <form>, so it points at it with the form attribute */}
-          <Button
-            type="submit"
-            form="signin-form"
-            className="w-full"
-            disabled={loading}
+
+          <div
+            role="separator"
+            className="my-5 flex w-full items-center gap-3 text-xs text-muted-foreground"
           >
-            {loading ? "Logging in..." : "Login"}
-          </Button>
+            <div className="h-px flex-1 bg-border" />
+            <span>or</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
 
           <div
             className={`flex w-full justify-center ${
@@ -212,8 +207,22 @@ export function SignIn() {
               width="300"
             />
           </div>
-        </CardFooter>
-      </Card>
+        </div>
+      </div>
+
+      {/* Right: image panel (desktop only) */}
+      <div className="relative hidden bg-muted lg:block">
+        <div className="absolute inset-0 bg-primary/10" />
+        <img
+          src="/auth-side.jpg"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover dark:brightness-[0.4]"
+          // No image file yet? Hide the broken icon and show the plain panel.
+          onError={(event) => {
+            event.currentTarget.style.display = "none"
+          }}
+        />
+      </div>
     </div>
   )
 }

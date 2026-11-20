@@ -49,6 +49,10 @@ const BACKOFF_MAX_MS = 30_000
 // Close code the server uses when the session was destroyed.
 const SIGNED_OUT_CODE = 4401
 
+// Close code the server uses when the account must re-accept the Terms or give
+// a date of birth (see recheckSession in backend/src/lib/socket.ts).
+const ONBOARDING_REQUIRED_CODE = 4403
+
 function socketUrl(): string {
   const base = API_URL || window.location.origin
   return `${base.replace(/^http/, "ws").replace(/\/$/, "")}/ws`
@@ -162,6 +166,14 @@ export function ChatSocketProvider() {
         return
       }
 
+      // Consents are out of date: refresh auth so ProtectedRoute sees
+      // onboardingRequired and redirects to /onboarding. No retry needed, the
+      // server would refuse the socket until onboarding is finished.
+      if (code === ONBOARDING_REQUIRED_CODE) {
+        void refreshRef.current()
+        return
+      }
+
       if (code === SIGNED_OUT_CODE || !reachedReady) {
         if (await sessionIsDead()) {
           if (!stopped) {
@@ -228,7 +240,7 @@ export function ChatSocketProvider() {
       ws.onclose = (event) => {
         console.log("ws closed", event.code, event.reason, "reachedReady:", reachedReady)
         window.clearTimeout(readyTimer)
-        
+
         // A stale socket (replaced or cleaned up) must not touch state.
         if (socketRef.current !== ws) {
           return

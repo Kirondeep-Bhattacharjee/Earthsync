@@ -3,14 +3,6 @@ import type { FormEvent } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { GoogleLogin } from "@react-oauth/google"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { apiFetch, ApiError, type AuthUser } from "@/lib/api"
@@ -163,70 +155,84 @@ export function SignUp() {
   }
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center p-4 pointer-events-none">
-      <Card className="w-full max-w-sm pointer-events-auto max-h-[calc(100dvh-2rem)] overflow-y-auto">
-        <CardHeader>
-          <CardTitle>Create an account</CardTitle>
-          <CardDescription>
-            Enter your email below to create your account
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+    // Fills the space under the Navbar (the parent <main> is a flex column).
+    <div className="grid min-h-0 w-full flex-1 lg:grid-cols-2">
+      {/* Left: the form */}
+      <div className="flex items-center justify-center px-6 py-6 md:px-10">
+        <div className="w-full max-w-md">
+          <div className="mb-5 flex flex-col items-center gap-1 text-center">
+            <h1 className="text-2xl font-bold">Create your account</h1>
+            <p className="text-sm text-muted-foreground">
+              Already have an account?{" "}
+              <Link to="/sign-in" className="underline underline-offset-4">
+                Sign in
+              </Link>
+            </p>
+          </div>
+
           <form id="signup-form" onSubmit={handleSubmit}>
-            <div className="flex flex-col gap-6">
-              <div className="grid gap-2">
-                <Label htmlFor="username">Username</Label>
-                <Input
-                  id="username"
-                  name="username"
-                  type="text"
-                  autoComplete="username"
-                  placeholder="Enter a unique username"
-                  aria-invalid={!!fieldErrors.username}
-                  required
-                />
-                <FieldError message={fieldErrors.username} />
+            <div className="flex flex-col gap-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="username">Username</Label>
+                  <Input
+                    id="username"
+                    name="username"
+                    type="text"
+                    autoComplete="username"
+                    placeholder="Unique username"
+                    aria-invalid={!!fieldErrors.username}
+                    required
+                  />
+                  <FieldError message={fieldErrors.username} />
+                </div>
 
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  placeholder="m@example.com"
-                  aria-invalid={!!fieldErrors.email}
-                  required
-                />
-                <FieldError message={fieldErrors.email} />
+                <div className="grid gap-1.5">
+                  <Label htmlFor="email">Email</Label>
+                  <Input
+                    id="email"
+                    name="email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="m@example.com"
+                    aria-invalid={!!fieldErrors.email}
+                    required
+                  />
+                  <FieldError message={fieldErrors.email} />
+                </div>
               </div>
 
-              <div className="grid gap-2">
-                <Label htmlFor="password">Create a Password</Label>
-                <Input
-                  id="password"
-                  name="password"
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={8}
-                  maxLength={72}
-                  aria-invalid={!!fieldErrors.password}
-                  required
-                />
-                <FieldError message={fieldErrors.password} />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                    maxLength={72}
+                    aria-invalid={!!fieldErrors.password}
+                    required
+                  />
+                  <FieldError message={fieldErrors.password} />
+                </div>
 
-                <Label htmlFor="confirm-password">Confirm Password</Label>
-                <Input
-                  id="confirm-password"
-                  name="confirmPassword"
-                  type="password"
-                  autoComplete="new-password"
-                  aria-invalid={!!fieldErrors.confirmPassword}
-                  required
-                />
-                <FieldError message={fieldErrors.confirmPassword} />
+                <div className="grid gap-1.5">
+                  <Label htmlFor="confirm-password">Confirm password</Label>
+                  <Input
+                    id="confirm-password"
+                    name="confirmPassword"
+                    type="password"
+                    autoComplete="new-password"
+                    aria-invalid={!!fieldErrors.confirmPassword}
+                    required
+                  />
+                  <FieldError message={fieldErrors.confirmPassword} />
+                </div>
               </div>
 
-              <div className="grid gap-2">
+              <div className="grid gap-1.5">
                 <Label htmlFor="date-of-birth">Date of birth</Label>
                 <Input
                   id="date-of-birth"
@@ -241,7 +247,7 @@ export function SignUp() {
                 <FieldError message={fieldErrors.dateOfBirth} />
               </div>
 
-              <div className="grid gap-3">
+              <div className="grid gap-2">
                 <div className="grid gap-1">
                   <div className="flex items-start gap-2">
                     <input
@@ -303,19 +309,22 @@ export function SignUp() {
                   {formError}
                 </p>
               )}
+
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? "Creating account..." : "Create Account"}
+              </Button>
             </div>
           </form>
-        </CardContent>
-        <CardFooter className="flex-col gap-2">
-          {/* Outside the <form>, so it points at it with the form attribute */}
-          <Button
-            type="submit"
-            form="signup-form"
-            className="w-full"
-            disabled={loading}
+
+          {/* Separate path: Google asks for its own details on the next step */}
+          <div
+            role="separator"
+            className="my-4 flex w-full items-center gap-3 text-xs text-muted-foreground"
           >
-            {loading ? "Creating account..." : "Create Account"}
-          </Button>
+            <div className="h-px flex-1 bg-border" />
+            <span>or</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
 
           <div
             className={`flex w-full justify-center ${
@@ -333,12 +342,22 @@ export function SignUp() {
               width="300"
             />
           </div>
+        </div>
+      </div>
 
-          <Button variant="link" onClick={() => navigate("/sign-in")}>
-            Already have an account? Sign In
-          </Button>
-        </CardFooter>
-      </Card>
+      {/* Right: image panel (desktop only) */}
+      <div className="relative hidden bg-muted lg:block">
+        <div className="absolute inset-0 bg-primary/10" />
+        <img
+          src="/auth-side.jpg"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover dark:brightness-[0.4]"
+          // No image file yet? Hide the broken icon and show the plain panel.
+          onError={(event) => {
+            event.currentTarget.style.display = "none"
+          }}
+        />
+      </div>
     </div>
   )
 }

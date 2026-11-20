@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS "account_private_dob_idx" ON "account_private" USING btree ("date_of_birth");

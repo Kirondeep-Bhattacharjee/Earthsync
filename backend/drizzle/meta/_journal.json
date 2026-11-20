@@ -71,6 +71,20 @@
       "when": 1795082485913,
       "tag": "0009_common_luckman",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795156112243,
+      "tag": "0010_dob_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795156134337,
+      "tag": "0011_dob_rules",
+      "breakpoints": true
     }
   ]
 }
