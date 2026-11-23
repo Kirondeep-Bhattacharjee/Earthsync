@@ -31,6 +31,20 @@ type LoadState =
 
 type Tab = "friends" | "public"
 
+// The one-line preview for a live message. Photos and voice notes have no text,
+// so they get the same labels the server uses in GET /api/conversations.
+function previewFor(message: ChatMessage): string {
+  if (message.kind === "image") {
+    return "Photo"
+  }
+
+  if (message.kind === "voice") {
+    return "Voice message"
+  }
+
+  return message.body ?? ""
+}
+
 // A new message in a thread that is already listed: update the preview, move
 // the thread to the top (where the server would sort it) and, when it came from
 // the other person, mark the thread unread. My own messages never make a
@@ -51,7 +65,7 @@ function applyMessage(
     unread: message.fromMe ? conversations[index].unread : true,
     lastMessageAt: message.createdAt,
     lastMessage: {
-      body: message.body,
+      body: previewFor(message),
       fromMe: message.fromMe,
       createdAt: message.createdAt,
     },

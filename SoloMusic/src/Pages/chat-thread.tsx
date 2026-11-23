@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   IconArrowLeft,
   IconDotsVertical,
+  IconMicrophone,
+  IconPhoto,
   IconSend,
   IconTrash,
 } from "@tabler/icons-react"
@@ -35,12 +37,25 @@ import {
 } from "@/components/ui/message-scroller"
 import { ChatThreadSkeleton } from "@/components/skeletons/chat-thread-skeleton"
 import {
+  IMAGE_MAX_BYTES,
+  UploadError,
+  prepareImage,
+  uploadAttachment,
+  type AttachmentKind,
+} from "@/lib/chat-attachment"
+import {
   useChatSocket,
+  type ChatMedia,
   type ChatMessage,
   type ServerEvent,
 } from "@/lib/chat-socket"
 import { formatDayLabel, isSameDay } from "@/lib/format-time"
 import { notifyUnreadChanged } from "@/lib/use-unread-count"
+import {
+  VOICE_MAX_SECONDS,
+  useVoiceRecorder,
+  type RecordedVoice,
+} from "@/lib/use-voice-recorder"
 import { cn } from "@/lib/utils"
 
 const API_URL = import.meta.env.VITE_API_URL ?? ""
@@ -49,6 +64,10 @@ const PAGE_SIZE = 30
 const MAX_LENGTH = 2000
 // A send with no ack after this long is shown as failed.
 const SEND_TIMEOUT_MS = 15_000
+// Signed media URLs last 30 to 45 minutes. Refetch well before that.
+const MEDIA_REFRESH_MS = 20 * 60_000
+// A broken image or audio element triggers a refetch, at most this often.
+const MEDIA_ERROR_REFRESH_GAP_MS = 30_000
 
 /* ------------------------------------------------------------------ */
 /* Types and helpers                                                   */
@@ -61,7 +80,16 @@ type Item = {
   key: string
   id: number | null
   clientId: string | null
-  body: string
+  kind: ChatMessage["kind"]
+  body: string | null
+  // Signed URLs from the server. Null while a photo or voice note is uploading.
+  media: ChatMedia | null
+  // A photo still uploading is shown from the file on this device.
+  localUrl: string | null
+  // 0 to 1 while an attachment uploads, otherwise null.
+  progress: number | null
+  // What to send again if the upload failed.
+  upload: { kind: AttachmentKind; file: Blob; fileName: string } | null
   createdAt: string
   fromMe: boolean
   status: "sent" | "sending" | "failed"
@@ -73,11 +101,18 @@ type LoadState =
   | { status: "unauthenticated" }
   | { status: "not-found" }
   | { status: "error" }
-  | { status: "ready"; items: Item[]; nextCursor: number | null }
+  | {
+      status: "ready"
+      items: Item[]
+      nextCursor: number | null
+      // Photos and voice notes can only be sent to friends.
+      isFriend: boolean
+    }
 
 type MessagesResponse = {
   messages: ChatMessage[]
   nextCursor: number | null
+  isFriend: boolean
 }
 
 const NO_ITEMS: Item[] = []
@@ -101,12 +136,23 @@ function newClientId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+function formatDuration(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds))
+
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`
+}
+
 function fromServer(message: ChatMessage): Item {
   return {
     key: `m${message.id}`,
     id: message.id,
     clientId: null,
+    kind: message.kind,
     body: message.body,
+    media: message.media,
+    localUrl: null,
+    progress: null,
+    upload: null,
     createdAt: message.createdAt,
     fromMe: message.fromMe,
     status: "sent",
@@ -143,7 +189,10 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
       existing
         ? {
             ...existing,
+            kind: message.kind,
             body: message.body,
+            // A refetch brings fresh signed URLs, so the media is replaced too.
+            media: message.media,
             createdAt: message.createdAt,
             status: "sent",
             error: null,
@@ -174,6 +223,99 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Photo and voice bubbles                                             */
+/* ------------------------------------------------------------------ */
+
+// The inside of a photo or voice bubble. While an upload is under way there is
+// no server media yet, so a photo is shown from the file on this device.
+// `onMediaError` fires when a signed URL has expired (see refreshMedia).
+function AttachmentView({
+  item,
+  onMediaError,
+}: {
+  item: Item
+  onMediaError: () => void
+}) {
+  const uploading = item.id === null && item.status === "sending"
+  const percent = Math.round((item.progress ?? 0) * 100)
+
+  if (item.kind === "image") {
+    const media = item.media
+    const src = media?.thumbUrl ?? media?.url ?? item.localUrl
+    // The size is known up front, so the thread does not jump when it loads.
+    const ratio =
+      media?.width && media.height ? `${media.width} / ${media.height}` : undefined
+
+    const picture = (
+      <div className="relative">
+        {src ? (
+          <img
+            src={src}
+            alt="Photo"
+            loading="lazy"
+            onError={onMediaError}
+            style={ratio ? { aspectRatio: ratio } : undefined}
+            className="block max-h-72 w-64 max-w-full rounded-md bg-muted object-cover"
+          />
+        ) : (
+          <div className="h-40 w-52 rounded-md bg-muted" />
+        )}
+
+        {uploading && (
+          <div
+            role="status"
+            className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60 text-xs font-medium text-foreground"
+          >
+            {percent}%
+          </div>
+        )}
+      </div>
+    )
+
+    return media ? (
+      <a
+        href={media.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Open photo"
+        className="block"
+      >
+        {picture}
+      </a>
+    ) : (
+      picture
+    )
+  }
+
+  if (item.media) {
+    return (
+      <audio
+        controls
+        preload="metadata"
+        src={item.media.url}
+        onError={onMediaError}
+        aria-label={
+          item.media.durationSeconds
+            ? `Voice message, ${formatDuration(item.media.durationSeconds)}`
+            : "Voice message"
+        }
+        className="h-10 w-60 max-w-full"
+      />
+    )
+  }
+
+  return (
+    <div
+      role={uploading ? "status" : undefined}
+      className="flex h-10 w-60 max-w-full items-center gap-2 px-2 text-xs"
+    >
+      <IconMicrophone className="size-4 shrink-0" aria-hidden="true" />
+      <span>{uploading ? `Sending voice message… ${percent}%` : "Voice message"}</span>
+    </div>
+  )
+}
+
 export default function ChatThread() {
   const { username = "" } = useParams<{ username: string }>()
   const navigate = useNavigate()
@@ -189,12 +331,20 @@ export default function ChatThread() {
   const [deleting, setDeleting] = React.useState(false)
   const [deleteError, setDeleteError] = React.useState<string | null>(null)
 
+  const [composerError, setComposerError] = React.useState<string | null>(null)
+
   const abortRef = React.useRef<AbortController | null>(null)
   const nameRef = React.useRef(username)
   const timersRef = React.useRef(new Map<string, number>())
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null)
+  // Object URLs for photos being uploaded; all are released when the page closes.
+  const objectUrlsRef = React.useRef(new Set<string>())
+  const fetchedAtRef = React.useRef(0)
+  const mediaErrorAtRef = React.useRef(0)
 
   const items = state.status === "ready" ? state.items : NO_ITEMS
   const nextCursor = state.status === "ready" ? state.nextCursor : null
+  const isFriend = state.status === "ready" ? state.isFriend : false
 
   /* ---------------------------- loading ---------------------------- */
 
@@ -233,6 +383,8 @@ export default function ChatThread() {
 
         const data = (await response.json()) as MessagesResponse
 
+        fetchedAtRef.current = Date.now()
+
         setState((previous) =>
           options.quiet && previous.status === "ready"
             ? {
@@ -242,11 +394,13 @@ export default function ChatThread() {
                   previous.items.length === 0
                     ? data.nextCursor
                     : previous.nextCursor,
+                isFriend: data.isFriend,
               }
             : {
                 status: "ready",
                 items: mergePage([], data.messages),
                 nextCursor: data.nextCursor,
+                isFriend: data.isFriend,
               }
         )
       } catch {
@@ -302,6 +456,7 @@ export default function ChatThread() {
     setOlderFailed(false)
     setDraft("")
     setPictureUrl(null)
+    setComposerError(null)
 
     if (!username) {
       setState({ status: "not-found" })
@@ -328,6 +483,44 @@ export default function ChatThread() {
       profileController.abort()
     }
   }, [username, loadLatest])
+
+  // Signed media URLs expire. Refetch the newest page (which brings fresh URLs)
+  // every 20 minutes while the tab is visible, and when the tab comes back after
+  // a long time away. Only the newest page is refreshed: a photo far up in older
+  // history that was loaded long ago may need "Load older messages" again.
+  React.useEffect(() => {
+    if (!isReady) {
+      return
+    }
+
+    function refreshIfStale() {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - fetchedAtRef.current >= MEDIA_REFRESH_MS
+      ) {
+        void loadLatest({ quiet: true })
+      }
+    }
+
+    const interval = window.setInterval(refreshIfStale, 60_000)
+
+    document.addEventListener("visibilitychange", refreshIfStale)
+
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener("visibilitychange", refreshIfStale)
+    }
+  }, [isReady, loadLatest])
+
+  // An image or audio element that fails to load most likely has an expired URL.
+  const refreshMedia = React.useCallback(() => {
+    if (Date.now() - mediaErrorAtRef.current < MEDIA_ERROR_REFRESH_GAP_MS) {
+      return
+    }
+
+    mediaErrorAtRef.current = Date.now()
+    void loadLatest({ quiet: true })
+  }, [loadLatest])
 
   // The socket came back after a drop: fetch what was missed.
   React.useEffect(() => {
@@ -371,6 +564,7 @@ export default function ChatThread() {
               status: "ready",
               items: mergePage(previous.items, data.messages),
               nextCursor: data.nextCursor,
+              isFriend: previous.isFriend,
             }
           : previous
       )
@@ -416,7 +610,12 @@ export default function ChatThread() {
         key: clientId,
         id: null,
         clientId,
+        kind: "text",
         body,
+        media: null,
+        localUrl: null,
+        progress: null,
+        upload: null,
         createdAt: new Date().toISOString(),
         fromMe: true,
         status: "sending",
@@ -475,7 +674,12 @@ export default function ChatThread() {
     }
   }
 
-  function retry(item: Item) {
+  function removeItem(item: Item) {
+    if (item.localUrl) {
+      URL.revokeObjectURL(item.localUrl)
+      objectUrlsRef.current.delete(item.localUrl)
+    }
+
     setState((previous) =>
       previous.status === "ready"
         ? {
@@ -484,19 +688,188 @@ export default function ChatThread() {
           }
         : previous
     )
-    sendBody(item.body)
+  }
+
+  function retry(item: Item) {
+    removeItem(item)
+
+    if (item.upload) {
+      void sendAttachment(item.upload.kind, item.upload.file, item.upload.fileName)
+    } else if (item.body !== null) {
+      sendBody(item.body)
+    }
   }
 
   function discard(item: Item) {
-    setState((previous) =>
-      previous.status === "ready"
-        ? {
-            ...previous,
-            items: previous.items.filter((other) => other.key !== item.key),
-          }
-        : previous
-    )
+    removeItem(item)
   }
+
+  /* -------------------------- attachments -------------------------- */
+
+  // Photos and voice notes go over REST (a socket frame is far too small). The
+  // bubble appears at once with a progress bar; when the server answers, the
+  // pending bubble is replaced by the saved message. The socket also pushes the
+  // same message, and mergePage dedupes by id, so it never shows twice.
+  const sendAttachment = React.useCallback(
+    async (kind: AttachmentKind, file: Blob, fileName: string) => {
+      const requestedFor = username
+      const clientId = newClientId()
+      const localUrl = kind === "image" ? URL.createObjectURL(file) : null
+
+      if (localUrl) {
+        objectUrlsRef.current.add(localUrl)
+      }
+
+      const pending: Item = {
+        key: clientId,
+        id: null,
+        clientId,
+        kind: kind === "image" ? "image" : "voice",
+        body: null,
+        media: null,
+        localUrl,
+        progress: 0,
+        upload: { kind, file, fileName },
+        createdAt: new Date().toISOString(),
+        fromMe: true,
+        status: "sending",
+        error: null,
+      }
+
+      setComposerError(null)
+      setState((previous) =>
+        previous.status === "ready"
+          ? { ...previous, items: [...previous.items, pending] }
+          : previous
+      )
+
+      // A failed upload keeps its preview so Retry can show it again.
+      let keepPreview = false
+
+      try {
+        const message = await uploadAttachment({
+          username: requestedFor,
+          kind,
+          file,
+          fileName,
+          onProgress: (fraction) => patchItem(clientId, { progress: fraction }),
+        })
+
+        // They moved to another thread meanwhile. The message is saved and will
+        // show when this thread is opened again.
+        if (nameRef.current !== requestedFor) {
+          return
+        }
+
+        setState((previous) =>
+          previous.status === "ready"
+            ? {
+                ...previous,
+                items: mergePage(
+                  previous.items.filter((item) => item.clientId !== clientId),
+                  [message]
+                ),
+              }
+            : previous
+        )
+      } catch (error) {
+        const status = error instanceof UploadError ? error.status : 0
+
+        if (status === 401) {
+          setState({ status: "unauthenticated" })
+          return
+        }
+
+        // A failure that belongs to a thread they already left changes nothing
+        // on screen (the pending bubble went with that thread's state).
+        if (nameRef.current !== requestedFor) {
+          return
+        }
+
+        keepPreview = true
+
+        patchItem(clientId, {
+          status: "failed",
+          progress: null,
+          error:
+            error instanceof UploadError
+              ? error.message
+              : "Could not send. Try again.",
+        })
+
+        // Not friends any more: stop offering photos and voice notes.
+        if (status === 403) {
+          setState((previous) =>
+            previous.status === "ready"
+              ? { ...previous, isFriend: false }
+              : previous
+          )
+        }
+      } finally {
+        if (localUrl && !keepPreview) {
+          URL.revokeObjectURL(localUrl)
+          objectUrlsRef.current.delete(localUrl)
+        }
+      }
+    },
+    [username, patchItem]
+  )
+
+  async function onPickImage(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+
+    // Reset so picking the same photo twice in a row still fires onChange.
+    event.target.value = ""
+
+    if (!file || state.status !== "ready") {
+      return
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setComposerError("Choose a photo to send.")
+      return
+    }
+
+    const prepared = await prepareImage(file)
+
+    if (prepared.size > IMAGE_MAX_BYTES) {
+      setComposerError("That photo is too large. Photos can be up to 5 MB.")
+      return
+    }
+
+    const name = prepared.type === "image/webp" ? "photo.webp" : file.name
+
+    void sendAttachment("image", prepared, name)
+  }
+
+  const onVoiceFinished = React.useCallback(
+    (voice: RecordedVoice) => {
+      void sendAttachment("voice", voice.blob, voice.fileName)
+    },
+    [sendAttachment]
+  )
+
+  const recorder = useVoiceRecorder(onVoiceFinished)
+  const cancelRecording = recorder.cancel
+
+  // Switching to another chat drops a recording in progress.
+  React.useEffect(() => {
+    return () => cancelRecording()
+  }, [username, cancelRecording])
+
+  // Leaving the page releases the photo previews. An upload already under way
+  // is left to finish, so a photo is not lost because they went back to the list.
+  React.useEffect(() => {
+    const urls = objectUrlsRef.current
+
+    return () => {
+      for (const url of urls) {
+        URL.revokeObjectURL(url)
+      }
+
+      urls.clear()
+    }
+  }, [])
 
   // Live events: the ack gives a pending message its id, an error fails it, and
   // a message for this thread is added (or updated if it is already listed).
@@ -754,9 +1127,18 @@ export default function ChatThread() {
                               item.status !== "sent" && "opacity-70"
                             )}
                           >
-                            <BubbleContent className="whitespace-pre-wrap break-words">
-                              {item.body}
-                            </BubbleContent>
+                            {item.kind === "text" ? (
+                              <BubbleContent className="whitespace-pre-wrap break-words">
+                                {item.body}
+                              </BubbleContent>
+                            ) : (
+                              <BubbleContent className="p-1">
+                                <AttachmentView
+                                  item={item}
+                                  onMediaError={refreshMedia}
+                                />
+                              </BubbleContent>
+                            )}
                           </Bubble>
 
                           <div
@@ -811,32 +1193,121 @@ export default function ChatThread() {
       {/* shrink-0 keeps the composer in place; the bottom padding clears the
           iPhone home bar (needs viewport-fit=cover in index.html). */}
       <div className="shrink-0 border-t bg-card p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-3">
-        <div className="flex items-end gap-2 rounded-2xl border bg-background p-1.5 shadow-xs focus-within:ring-2 focus-within:ring-ring/50">
-          {/* Plain textarea: the shadcn Textarea has its own min height, which
-              pushed the text to the top. h-9 and py-2 match the 36px send
-              button, so one line is centered and it grows upward from there.
-              text-base on mobile: iPhone Safari zooms the page on focus when
-              an input's text is under 16px. */}
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={onComposerKeyDown}
-            placeholder={`Message @${username}`}
-            aria-label="Message"
-            rows={1}
-            maxLength={MAX_LENGTH}
-            className="max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-base leading-5 outline-none [field-sizing:content] placeholder:text-muted-foreground md:text-sm"
-          />
-          <Button
-            size="icon"
-            className="size-9 shrink-0 rounded-full"
-            aria-label="Send message"
-            disabled={draft.trim() === ""}
-            onClick={submit}
-          >
-            <IconSend aria-hidden="true" />
-          </Button>
-        </div>
+        {(composerError ?? recorder.error) && (
+          <p role="alert" className="mb-2 px-2 text-xs text-destructive">
+            {composerError ?? recorder.error}
+          </p>
+        )}
+
+        {/* Photos and voice notes are friends only (the server enforces it
+            too); the buttons are not shown to anyone else. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(event) => void onPickImage(event)}
+        />
+
+        {recorder.state === "recording" ? (
+          <div className="flex items-center gap-2 rounded-2xl border bg-background p-1.5 shadow-xs">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-9 shrink-0 rounded-full"
+              aria-label="Cancel recording"
+              onClick={recorder.cancel}
+            >
+              <IconTrash aria-hidden="true" />
+            </Button>
+
+            <div
+              role="status"
+              className="flex min-w-0 flex-1 items-center gap-2 px-1 text-sm"
+            >
+              <span
+                aria-hidden="true"
+                className="size-2.5 shrink-0 animate-pulse rounded-full bg-destructive"
+              />
+              <span className="tabular-nums">
+                {formatDuration(recorder.elapsed)} /{" "}
+                {formatDuration(VOICE_MAX_SECONDS)}
+              </span>
+            </div>
+
+            <Button
+              size="icon"
+              className="size-9 shrink-0 rounded-full"
+              aria-label="Send voice message"
+              onClick={recorder.stop}
+            >
+              <IconSend aria-hidden="true" />
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-end gap-2 rounded-2xl border bg-background p-1.5 shadow-xs focus-within:ring-2 focus-within:ring-ring/50">
+            {isFriend && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-9 shrink-0 rounded-full"
+                aria-label="Send a photo"
+                onClick={() => {
+                  setComposerError(null)
+                  fileInputRef.current?.click()
+                }}
+              >
+                <IconPhoto aria-hidden="true" />
+              </Button>
+            )}
+
+            {/* Plain textarea: the shadcn Textarea has its own min height, which
+                pushed the text to the top. h-9 and py-2 match the 36px send
+                button, so one line is centered and it grows upward from there.
+                text-base on mobile: iPhone Safari zooms the page on focus when
+                an input's text is under 16px. */}
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={onComposerKeyDown}
+              placeholder={`Message @${username}`}
+              aria-label="Message"
+              rows={1}
+              maxLength={MAX_LENGTH}
+              className="max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-base leading-5 outline-none [field-sizing:content] placeholder:text-muted-foreground md:text-sm"
+            />
+
+            {/* With nothing typed, a friend gets the microphone; as soon as
+                there is text, it turns into Send. */}
+            {isFriend && recorder.supported && draft.trim() === "" ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-9 shrink-0 rounded-full"
+                aria-label="Record a voice message"
+                disabled={recorder.state === "starting"}
+                onClick={() => {
+                  setComposerError(null)
+                  void recorder.start()
+                }}
+              >
+                <IconMicrophone aria-hidden="true" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                className="size-9 shrink-0 rounded-full"
+                aria-label="Send message"
+                disabled={draft.trim() === ""}
+                onClick={submit}
+              >
+                <IconSend aria-hidden="true" />
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
       <AlertDialog

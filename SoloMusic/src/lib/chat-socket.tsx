@@ -6,9 +6,21 @@ import { useAuth } from "@/lib/auth"
 /* Protocol (mirrors backend/src/lib/socket.ts)                        */
 /* ------------------------------------------------------------------ */
 
+// Signed URLs for one photo or voice note. They expire after 30 to 45 minutes,
+// so a page that stays open refetches (see refreshMedia in chat-thread.tsx).
+export type ChatMedia = {
+  url: string
+  thumbUrl: string | null
+  width: number | null
+  height: number | null
+  durationSeconds: number | null
+}
+
 export type ChatMessage = {
   id: number
-  body: string
+  kind: "text" | "image" | "voice"
+  body: string | null // null for photos and voice notes
+  media: ChatMedia | null
   createdAt: string
   fromMe: boolean
 }
