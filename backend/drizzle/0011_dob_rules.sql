@@ -11,7 +11,7 @@ BEGIN
     RAISE EXCEPTION 'date_of_birth is immutable';
   END IF;
 
-  RETURN NEW;npm run db:migrate
+  RETURN NEW;
 END $$ LANGUAGE plpgsql;
 --> statement-breakpoint
 DROP TRIGGER IF EXISTS account_private_dob_rules ON account_private;

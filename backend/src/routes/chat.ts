@@ -12,7 +12,15 @@ import {
 } from "../db/schema.js";
 import { requireAuth } from "../middlewares/requireAuth.js";
 import { handleError, validationError } from "../lib/http.js";
-import { findPeer, messageBodySchema, sendMessage } from "../lib/chat.js";
+import {
+    chatMessageFromSent,
+    findPeer,
+    messageBodySchema,
+    previewText,
+    readMessageText,
+    sendMessage,
+    serializeMessage,
+} from "../lib/chat.js";
 import { announceMessage } from "../lib/socket.js";
 import { usernameSchema } from "../lib/username.js";
 
@@ -127,12 +135,7 @@ router.post("/messages", requireAuth, sendLimiter, async (req, res) => {
         await announceMessage(sent);
 
         return res.status(201).json({
-            chatMessage: {
-                id: sent.id,
-                body: sent.body,
-                createdAt: sent.createdAt,
-                fromMe: true,
-            },
+            chatMessage: chatMessageFromSent(sent, true),
         });
     } catch (error) {
         return handleError(res, error, "Send message");
@@ -201,9 +204,13 @@ router.get("/conversations", requireAuth, async (req, res) => {
         // me has its last message newer than my hidden-before, so it is safe to show.
         const lastRows = await db
             .select({
+                id: messages.id,
                 conversationId: messages.conversationId,
                 senderId: messages.senderId,
+                kind: messages.kind,
                 body: messages.body,
+                bodyEnc: messages.bodyEnc,
+                keyVersion: messages.keyVersion,
                 createdAt: messages.createdAt,
             })
             .from(messages)
@@ -240,7 +247,9 @@ router.get("/conversations", requireAuth, async (req, res) => {
                     lastMessageAt: row.lastMessageAt,
                     lastMessage: last
                         ? {
-                              body: last.body,
+                              kind: last.kind,
+                              // Text, or "Photo" / "Voice message".
+                              body: previewText(last.kind, readMessageText(last)),
                               fromMe: last.senderId === viewerId,
                               createdAt: last.createdAt,
                           }
@@ -323,8 +332,12 @@ router.get(
             const rows = await db
                 .select({
                     id: messages.id,
+                    conversationId: messages.conversationId,
                     senderId: messages.senderId,
+                    kind: messages.kind,
                     body: messages.body,
+                    bodyEnc: messages.bodyEnc,
+                    keyVersion: messages.keyVersion,
                     createdAt: messages.createdAt,
                 })
                 .from(messages)
@@ -350,12 +363,9 @@ router.get(
             const oldest = page[page.length - 1];
 
             return res.json({
-                messages: page.reverse().map((row) => ({
-                    id: row.id,
-                    body: row.body,
-                    createdAt: row.createdAt,
-                    fromMe: row.senderId === viewerId,
-                })),
+                messages: page
+                    .reverse()
+                    .map((row) => serializeMessage(row, viewerId)),
                 nextCursor: rows.length > limit && oldest ? oldest.id : null,
             });
         } catch (error) {

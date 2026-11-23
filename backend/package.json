@@ -12,7 +12,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "db:migrate:ws": "tsx src/db/migrate.ts"
+    "db:migrate:ws": "tsx src/db/migrate.ts",
+    "db:encrypt-messages": "tsx src/db/encrypt-messages.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1163.0",

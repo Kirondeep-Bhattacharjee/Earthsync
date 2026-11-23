@@ -85,6 +85,13 @@
       "when": 1795156134337,
       "tag": "0011_dob_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795409486957,
+      "tag": "0012_chat_messages_media",
+      "breakpoints": true
     }
   ]
 }

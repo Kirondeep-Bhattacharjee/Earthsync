@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { conversations, messages, profiles } from "../db/schema.js";
+import { decryptText, encryptText, messageAad } from "./crypto.js";
 import { HttpError } from "./http.js";
 import { isBlockedEitherWay } from "./relationships.js";
 import { usernameSchema } from "./username.js";
@@ -27,14 +28,127 @@ export const messageBodySchema = z
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
+export type MessageKind = "text" | "image" | "voice";
+
+// Filled in when image and voice messages arrive.
+export type ChatMedia = {
+    url: string;
+    thumbUrl: string | null;
+    width: number | null;
+    height: number | null;
+    durationSeconds: number | null;
+};
+
+// What the API and the WebSocket send to a client. One shape for history, the
+// REST send response and live pushes, built only by the helpers below.
+export type ChatMessage = {
+    id: number;
+    kind: MessageKind;
+    body: string | null; // null for image and voice messages
+    media: ChatMedia | null;
+    createdAt: Date;
+    fromMe: boolean;
+};
+
 export type SentMessage = {
     id: number;
     conversationId: number;
     senderId: number;
     recipientId: number; // the WebSocket layer pushes to this user's open sockets
-    body: string;
+    kind: MessageKind;
+    body: string | null; // plaintext, in memory only; the database holds ciphertext
+    media: ChatMedia | null;
     createdAt: Date;
 };
+
+// A messages row as it is stored.
+export type StoredMessage = {
+    id: number;
+    conversationId: number;
+    senderId: number;
+    kind: MessageKind;
+    body: string | null; // legacy plaintext, until the backfill has run
+    bodyEnc: string | null;
+    keyVersion: number | null;
+    createdAt: Date;
+};
+
+/* ------------------------------------------------------------------ */
+/* Reading and serializing                                             */
+/* ------------------------------------------------------------------ */
+
+const UNREADABLE_TEXT = "This message can't be displayed";
+
+// The text of a stored message. Encrypted rows are decrypted; rows from before
+// encryption still have plaintext in `body`. A row that cannot be decrypted
+// (wrong key, damaged data) is logged and shown as a placeholder, so one bad
+// row never breaks a whole page of history.
+export function readMessageText(row: StoredMessage): string | null {
+    if (row.bodyEnc === null) {
+        return row.body;
+    }
+
+    try {
+        if (row.keyVersion === null) {
+            throw new Error("missing key_version");
+        }
+
+        return decryptText(
+            row.bodyEnc,
+            row.keyVersion,
+            messageAad(row.conversationId, row.senderId)
+        );
+    } catch (error) {
+        console.error(`Could not decrypt message ${row.id}:`, error);
+        return UNREADABLE_TEXT;
+    }
+}
+
+// A stored message as one viewer should see it. Every read path uses this, so
+// anything that has to change per viewer (for example masking a blocked
+// person) changes in one place.
+export function serializeMessage(
+    row: StoredMessage,
+    viewerId: number,
+    media: ChatMedia | null = null
+): ChatMessage {
+    return {
+        id: row.id,
+        kind: row.kind,
+        body: row.kind === "text" ? readMessageText(row) : null,
+        media,
+        createdAt: row.createdAt,
+        fromMe: row.senderId === viewerId,
+    };
+}
+
+// The same shape for a message that was just sent.
+export function chatMessageFromSent(
+    sent: SentMessage,
+    fromMe: boolean
+): ChatMessage {
+    return {
+        id: sent.id,
+        kind: sent.kind,
+        body: sent.body,
+        media: sent.media,
+        createdAt: sent.createdAt,
+        fromMe,
+    };
+}
+
+// One line for the inbox row: the text itself, or a label for attachments.
+export function previewText(kind: MessageKind, body: string | null): string {
+    if (kind === "image") {
+        return "Photo";
+    }
+
+    if (kind === "voice") {
+        return "Voice message";
+    }
+
+    return body ?? "";
+}
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -125,12 +239,20 @@ export async function sendMessage(
 
         // created_at defaults to now() too, which is the transaction time, so it
         // equals last_message_at exactly. The inbox relies on that.
+        // Text is stored encrypted; the plaintext never reaches the database.
+        const { bodyEnc, keyVersion } = encryptText(
+            body.data,
+            messageAad(conversation.id, senderId)
+        );
+
         const [message] = await tx
             .insert(messages)
             .values({
                 conversationId: conversation.id,
                 senderId,
-                body: body.data,
+                kind: "text",
+                bodyEnc,
+                keyVersion,
             })
             .returning({ id: messages.id, createdAt: messages.createdAt });
 
@@ -143,7 +265,9 @@ export async function sendMessage(
             conversationId: conversation.id,
             senderId,
             recipientId,
+            kind: "text",
             body: body.data,
+            media: null,
             createdAt: message.createdAt,
         };
     });

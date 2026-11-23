@@ -3,9 +3,11 @@ import {
     pgEnum,
     serial,
     integer,
+    smallint,
     bigint,
     uuid,
     varchar,
+    text,
     boolean,
     json,
     timestamp,
@@ -257,7 +259,9 @@ export const conversations = pgTable(
         lastMessageAt: timestamp("last_message_at").defaultNow().notNull(),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         lowReadAt: timestamp("low_read_at"),
-        highReadAt: timestamp("high_read_at")
+        highReadAt: timestamp("high_read_at"),
+        // Set by a report so the retention job keeps this thread as evidence.
+        retentionHold: boolean("retention_hold").notNull().default(false),
     },
     (t) => [
         check("conversations_ordered", sql`${t.userLowId} < ${t.userHighId}`),
@@ -273,11 +277,17 @@ export const conversations = pgTable(
 /* Messages                                                            */
 /* ------------------------------------------------------------------ */
 
+export const messageKind = pgEnum("message_kind", ["text", "image", "voice"])
+
 // Messages belong to a conversation, never to a friendship. senderId must be
 // one of the conversation's two users: a check constraint can't see another
 // table, so sendMessage() enforces it (the sender comes from the session, never
 // from the client). Pagination cursor is the id (it only grows), so history
 // loads as "id < cursor, newest first".
+//
+// Text is stored encrypted (body_enc + key_version). `body` is the old
+// plaintext column: nullable now, and dropped once the backfill has run.
+// Image and voice messages carry a media row instead of text.
 export const messages = pgTable(
     "messages",
     {
@@ -288,11 +298,27 @@ export const messages = pgTable(
         senderId: integer("sender_id")
             .notNull()
             .references(() => users.id, { onDelete: "cascade" }),
-        body: varchar("body", { length: 2000 }).notNull(),
+        kind: messageKind("kind").notNull().default("text"),
+        body: varchar("body", { length: 2000 }),
+        bodyEnc: text("body_enc"),
+        keyVersion: smallint("key_version"),
+        // The retention job deletes the message first, then its media row.
+        mediaId: uuid("media_id")
+            .unique()
+            .references(() => media.id, { onDelete: "restrict" }),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [
-        check("messages_body_not_empty", sql`length(btrim(${t.body})) > 0`),
+        // Text needs a body (plain or encrypted); image and voice need media.
+        check(
+            "messages_content",
+            sql`(${t.kind} = 'text' AND (${t.body} IS NOT NULL OR ${t.bodyEnc} IS NOT NULL)) OR (${t.kind} <> 'text' AND ${t.mediaId} IS NOT NULL)`
+        ),
+        // An encrypted body always says which key encrypted it.
+        check(
+            "messages_enc_has_version",
+            sql`${t.bodyEnc} IS NULL OR ${t.keyVersion} IS NOT NULL`
+        ),
         // "Latest messages in this conversation" and the id cursor.
         index("messages_conversation_idx").on(t.conversationId, t.id.desc()),
     ]
@@ -302,7 +328,7 @@ export const messages = pgTable(
 /* Media (images and videos stored in R2) - not used by avatars        */
 /* ------------------------------------------------------------------ */
 
-export const mediaType = pgEnum("media_type", ["image", "video"])
+export const mediaType = pgEnum("media_type", ["image", "video", "audio"])
 export const mediaStatus = pgEnum("media_status", [
     "pending", // presigned URL issued, upload not confirmed yet
     "processing", // uploaded, waiting on or running ffmpeg/ffprobe
@@ -326,6 +352,8 @@ export const media = pgTable(
         height: integer("height"),
         durationSeconds: integer("duration_seconds"), // videos only
         status: mediaStatus("status").notNull().default("pending"),
+        // SHA-256 of the stored bytes: proves later that evidence is unchanged.
+        sha256: varchar("sha256", { length: 64 }),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [index("media_user_id_idx").on(t.userId)]

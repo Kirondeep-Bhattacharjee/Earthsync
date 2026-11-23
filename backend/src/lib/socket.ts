@@ -7,15 +7,16 @@ import { z } from "zod";
 import { db } from "../db/index.js";
 import { profiles } from "../db/schema.js";
 import { HttpError } from "./http.js";
+import { sessionMiddleware, sessionStore } from "./session.js";
+import { usernameSchema } from "./username.js";
+import { getOnboardingStatus } from "./onboarding.js";
 import {
+    chatMessageFromSent,
     findPeer,
     messageBodySchema,
     sendMessage,
     type SentMessage,
 } from "./chat.js";
-import { sessionMiddleware, sessionStore } from "./session.js";
-import { usernameSchema } from "./username.js";
-import { getOnboardingStatus } from "./onboarding.js";
 
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
@@ -159,18 +160,16 @@ export async function announceMessage(sent: SentMessage): Promise<void> {
             return;
         }
 
-        const base = { id: sent.id, body: sent.body, createdAt: sent.createdAt };
-
-        // Each side sees the thread under the other person's username.
+                // Each side sees the thread under the other person's username.
         pushToUser(sent.senderId, {
             type: "message",
             username: recipientName,
-            chatMessage: { ...base, fromMe: true },
+            chatMessage: chatMessageFromSent(sent, true),
         });
         pushToUser(sent.recipientId, {
             type: "message",
             username: senderName,
-            chatMessage: { ...base, fromMe: false },
+            chatMessage: chatMessageFromSent(sent, false),
         });
     } catch (error) {
         console.error("Announce message error:", error);

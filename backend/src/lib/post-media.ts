@@ -9,8 +9,8 @@ import { HttpError } from "./http.js";
 // These two packages are CommonJS and ship their own typings in different
 // shapes, so load them with require instead of fighting ESM interop.
 const require = createRequire(import.meta.url);
-const ffmpegPath = require("ffmpeg-static") as string | null;
-const ffprobePath = (require("ffprobe-static") as { path: string }).path;
+export const ffmpegPath = require("ffmpeg-static") as string | null;
+export const ffprobePath = (require("ffprobe-static") as { path: string }).path;
 
 /* ------------------------------------------------------------------ */
 /* Limits                                                              */
@@ -67,7 +67,7 @@ export type ProcessedMedia = {
     durationSeconds: number | null;
 };
 
-type UploadedFile = { path: string; mimetype: string; size: number };
+export type UploadedFile = { path: string; mimetype: string; size: number };
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -75,7 +75,7 @@ type UploadedFile = { path: string; mimetype: string; size: number };
 
 // Runs a program with an argument array (never through a shell) and kills it
 // if it takes too long.
-function run(
+export function run(
     command: string,
     args: string[],
     timeoutMs: number
@@ -127,7 +127,7 @@ type ProbeOutput = {
 // A user-supplied file can be a crafted playlist that points ffmpeg at other
 // files or at network addresses. Allowing only the "file" protocol closes
 // the network side; the format allowlist in probeVideo closes the rest.
-const SAFE_INPUT = ["-protocol_whitelist", "file"];
+export const SAFE_INPUT = ["-protocol_whitelist", "file"];
 
 // When `checkFormat` is true the container must be on the allowlist. It is
 // only needed for the user's upload: our own re-encoded output is always MP4.
@@ -199,7 +199,7 @@ async function makeThumb(input: Buffer | string): Promise<Buffer> {
 // Decodes the file (so non-images fail here, whatever the client claimed),
 // applies the EXIF rotation, limits the size and re-encodes as WebP. sharp
 // drops all metadata, including GPS location, unless asked to keep it.
-async function processImage(path: string): Promise<ProcessedMedia> {
+export async function processImage(path: string): Promise<ProcessedMedia> {
     try {
         const metadata = await sharp(path, {
             limitInputPixels: IMAGE_MAX_INPUT_PIXELS,
