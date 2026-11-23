@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import type { FormEvent } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import { Button } from "@/components/ui/button"
+import { DobPicker } from "@/components/dob-picker"
 import {
   Card,
   CardContent,
@@ -33,9 +34,7 @@ function FieldError({ message }: { message?: string | undefined }) {
 }
 
 // Today as YYYY-MM-DD, so the date picker cannot select a future date.
-function todayString() {
-  return new Date().toISOString().slice(0, 10)
-}
+
 
 // Shown to two kinds of people:
 //  - a brand new Google user: no account exists yet, they choose a username,
@@ -233,16 +232,7 @@ export function Onboarding() {
               {info.needsDob && (
                 <div className="grid gap-2">
                   <Label htmlFor="date-of-birth">Date of birth</Label>
-                  <Input
-                    id="date-of-birth"
-                    name="dateOfBirth"
-                    type="date"
-                    autoComplete="bday"
-                    min="1900-01-01"
-                    max={todayString()}
-                    aria-invalid={!!fieldErrors.dateOfBirth}
-                    required
-                  />
+                  <DobPicker invalid={!!fieldErrors.dateOfBirth} />
                   <FieldError message={fieldErrors.dateOfBirth} />
                 </div>
               )}

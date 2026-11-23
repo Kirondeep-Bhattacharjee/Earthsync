@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label"
 import { apiFetch, ApiError, type AuthUser } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { dobSchema, isAdult } from "@/lib/dob"
+import { DobPicker } from "@/components/dob-picker"
 
 type AuthResponse = {
   message: string
@@ -24,10 +25,7 @@ function FieldError({ message }: { message?: string | undefined }) {
   return <p className="text-sm text-destructive">{message}</p>
 }
 
-// Today as YYYY-MM-DD, so the date picker cannot select a future date.
-function todayString() {
-  return new Date().toISOString().slice(0, 10)
-}
+
 
 export function SignUp() {
   const navigate = useNavigate()
@@ -234,16 +232,7 @@ export function SignUp() {
 
               <div className="grid gap-1.5">
                 <Label htmlFor="date-of-birth">Date of birth</Label>
-                <Input
-                  id="date-of-birth"
-                  name="dateOfBirth"
-                  type="date"
-                  autoComplete="bday"
-                  min="1900-01-01"
-                  max={todayString()}
-                  aria-invalid={!!fieldErrors.dateOfBirth}
-                  required
-                />
+                <DobPicker invalid={!!fieldErrors.dateOfBirth} />
                 <FieldError message={fieldErrors.dateOfBirth} />
               </div>
 
