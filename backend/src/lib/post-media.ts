@@ -6,6 +6,8 @@ import { join } from "node:path";
 import sharp from "sharp";
 import { HttpError } from "./http.js";
 
+// Windows: sharp can keep input files open and block deleting them (EBUSY).
+sharp.cache(false);
 // These two packages are CommonJS and ship their own typings in different
 // shapes, so load them with require instead of fighting ESM interop.
 const require = createRequire(import.meta.url);
@@ -201,7 +203,11 @@ async function makeThumb(input: Buffer | string): Promise<Buffer> {
 // drops all metadata, including GPS location, unless asked to keep it.
 export async function processImage(path: string): Promise<ProcessedMedia> {
     try {
-        const metadata = await sharp(path, {
+        // Read the file once and hand sharp the bytes, not the path, so no
+        // file handle is left open (Windows refuses to delete a locked file).
+        const input = await readFile(path);
+
+        const metadata = await sharp(input, {
             limitInputPixels: IMAGE_MAX_INPUT_PIXELS,
         }).metadata();
 
@@ -209,7 +215,7 @@ export async function processImage(path: string): Promise<ProcessedMedia> {
             throw new Error(`Unsupported image format: ${metadata.format}`);
         }
 
-        const { data, info } = await sharp(path, {
+        const { data, info } = await sharp(input, {
             limitInputPixels: IMAGE_MAX_INPUT_PIXELS,
         })
             .rotate()

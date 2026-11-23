@@ -129,12 +129,22 @@ router.post(
                 chatMessage: chatMessageFromSent(sent, true),
             });
         } catch (error) {
-            // Unused files must not be left behind.
-            await deleteChatObjects(uploadedKeys);
+            // Unused files must not be left behind. A failed cleanup must not
+            // throw either, or it would hide the real error.
+            await deleteChatObjects(uploadedKeys).catch(() => {});
             return handleError(res, error, "Send attachment");
         } finally {
             if (file) {
-                await rm(file.path, { force: true });
+                // Windows can hold the temp file for a moment (EBUSY). Retry a
+                // few times, and never let a failed cleanup throw: the response
+                // has usually been sent by now.
+                await rm(file.path, {
+                    force: true,
+                    maxRetries: 5,
+                    retryDelay: 100,
+                }).catch((error) => {
+                    console.warn("Could not remove temp upload:", error);
+                });
             }
         }
     }
