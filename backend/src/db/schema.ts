@@ -304,8 +304,8 @@ export const messages = pgTable(
         keyVersion: smallint("key_version"),
         // The retention job deletes the message first, then its media row.
         mediaId: uuid("media_id")
-            .unique()
-            .references(() => media.id, { onDelete: "restrict" }),
+        .unique()
+        .references(() => media.id),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [
