@@ -2,6 +2,8 @@ import * as React from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   IconArrowLeft,
+  IconCheck,
+  IconChecks,
   IconDotsVertical,
   IconMicrophone,
   IconPhoto,
@@ -47,6 +49,7 @@ import {
   useChatSocket,
   type ChatMedia,
   type ChatMessage,
+  type ReceiptStatus,
   type ServerEvent,
 } from "@/lib/chat-socket"
 import { formatDayLabel, isSameDay } from "@/lib/format-time"
@@ -93,6 +96,9 @@ type Item = {
   createdAt: string
   fromMe: boolean
   status: "sent" | "sending" | "failed"
+  // Delivery state of my own message (sent, delivered, read). Separate from
+  // `status`, which is only about the send itself.
+  receipt: ReceiptStatus | null
   error: string | null
 }
 
@@ -142,6 +148,42 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`
 }
 
+const RECEIPT_RANK: Record<ReceiptStatus, number> = {
+  sent: 0,
+  delivered: 1,
+  read: 2,
+}
+
+// A message only ever moves forward: sent, delivered, read.
+function maxReceipt(
+  a: ReceiptStatus | null,
+  b: ReceiptStatus | null
+): ReceiptStatus | null {
+  if (a === null) return b
+  if (b === null) return a
+
+  return RECEIPT_RANK[a] >= RECEIPT_RANK[b] ? a : b
+}
+
+// Highest message ids the other person has received / read. A live receipt can
+// arrive before the message it covers is in the list (a REST send), so these are
+// kept separately and applied when drawing, instead of patching items.
+type Floors = { delivered: number; read: number }
+
+function receiptFor(item: Item, floors: Floors): ReceiptStatus {
+  let status: ReceiptStatus = item.receipt ?? "sent"
+
+  if (item.id !== null) {
+    if (item.id <= floors.read) {
+      status = maxReceipt(status, "read") as ReceiptStatus
+    } else if (item.id <= floors.delivered) {
+      status = maxReceipt(status, "delivered") as ReceiptStatus
+    }
+  }
+
+  return status
+}
+
 function fromServer(message: ChatMessage): Item {
   return {
     key: `m${message.id}`,
@@ -156,6 +198,7 @@ function fromServer(message: ChatMessage): Item {
     createdAt: message.createdAt,
     fromMe: message.fromMe,
     status: "sent",
+    receipt: message.status,
     error: null,
   }
 }
@@ -195,6 +238,7 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
             media: message.media,
             createdAt: message.createdAt,
             status: "sent",
+            receipt: maxReceipt(existing.receipt, message.status),
             error: null,
           }
         : fromServer(message)
@@ -213,7 +257,13 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
       .filter((item) => item.id !== id)
       .map((item) =>
         item.clientId === clientId
-          ? { ...item, id, status: "sent" as const, error: null }
+          ? {
+              ...item,
+              id,
+              status: "sent" as const,
+              receipt: item.receipt ?? ("sent" as const),
+              error: null,
+            }
           : item
       )
   )
@@ -226,6 +276,26 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
 /* ------------------------------------------------------------------ */
 /* Photo and voice bubbles                                             */
 /* ------------------------------------------------------------------ */
+
+// One tick = sent, two = delivered, two in color = read. The blue is the one
+// color that is not a theme token: it has to stand out from the muted ticks in
+// both light and dark mode. Swap it if you prefer another.
+function ReceiptTicks({ status }: { status: ReceiptStatus }) {
+  const label =
+    status === "read" ? "Read" : status === "delivered" ? "Delivered" : "Sent"
+  const Icon = status === "sent" ? IconCheck : IconChecks
+
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={cn("inline-flex items-center", status === "read" && "text-sky-500")}
+    >
+      <Icon className="size-4" aria-hidden="true" />
+    </span>
+  )
+}
 
 // The inside of a photo or voice bubble. While an upload is under way there is
 // no server media yet, so a photo is shown from the file on this device.
@@ -332,6 +402,7 @@ export default function ChatThread() {
   const [deleteError, setDeleteError] = React.useState<string | null>(null)
 
   const [composerError, setComposerError] = React.useState<string | null>(null)
+  const [floors, setFloors] = React.useState<Floors>({ delivered: 0, read: 0 })
 
   const abortRef = React.useRef<AbortController | null>(null)
   const nameRef = React.useRef(username)
@@ -457,6 +528,7 @@ export default function ChatThread() {
     setDraft("")
     setPictureUrl(null)
     setComposerError(null)
+    setFloors({ delivered: 0, read: 0 })
 
     if (!username) {
       setState({ status: "not-found" })
@@ -619,6 +691,7 @@ export default function ChatThread() {
         createdAt: new Date().toISOString(),
         fromMe: true,
         status: "sending",
+        receipt: null,
         error: null,
       }
 
@@ -733,6 +806,7 @@ export default function ChatThread() {
         createdAt: new Date().toISOString(),
         fromMe: true,
         status: "sending",
+        receipt: null,
         error: null,
       }
 
@@ -875,6 +949,23 @@ export default function ChatThread() {
   // a message for this thread is added (or updated if it is already listed).
   React.useEffect(() => {
     return subscribe((event: ServerEvent) => {
+      if (event.type === "receipt") {
+        if (event.username === username) {
+          setFloors((previous) => ({
+            delivered:
+              event.status === "delivered"
+                ? Math.max(previous.delivered, event.upToId)
+                : previous.delivered,
+            read:
+              event.status === "read"
+                ? Math.max(previous.read, event.upToId)
+                : previous.read,
+          }))
+        }
+
+        return
+      }
+
       if (event.type === "ack" && event.clientId) {
         const clientId = event.clientId
         const id = event.id
@@ -1172,9 +1263,14 @@ export default function ChatThread() {
                             )}
 
                             {item.status === "sent" && (
-                              <time dateTime={item.createdAt}>
-                                {formatClock(item.createdAt)}
-                              </time>
+                              <>
+                                <time dateTime={item.createdAt}>
+                                  {formatClock(item.createdAt)}
+                                </time>
+                                {item.fromMe && (
+                                  <ReceiptTicks status={receiptFor(item, floors)} />
+                                )}
+                              </>
                             )}
                           </div>
                         </MessageContent>

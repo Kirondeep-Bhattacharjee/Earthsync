@@ -1,6 +1,6 @@
 import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import multer from "multer";
@@ -34,7 +34,7 @@ const postColumns = {
     id: posts.id,
     caption: posts.caption,
     createdAt: posts.createdAt,
-    type: media.type,
+    type: sql<"image" | "video">`${media.type}`,
     key: media.key,
     thumbKey: media.thumbKey,
     width: media.width,

@@ -16,6 +16,9 @@ export type ChatMedia = {
   durationSeconds: number | null
 }
 
+// Delivery state of one of MY messages. It only ever moves forward.
+export type ReceiptStatus = "sent" | "delivered" | "read"
+
 export type ChatMessage = {
   id: number
   kind: "text" | "image" | "voice"
@@ -23,12 +26,21 @@ export type ChatMessage = {
   media: ChatMedia | null
   createdAt: string
   fromMe: boolean
+  status: ReceiptStatus | null // only for my own messages
 }
 
 export type ServerEvent =
   | { type: "ready" }
   | { type: "ack"; clientId?: string; id: number }
   | { type: "message"; username: string; chatMessage: ChatMessage }
+  // My messages in the thread with `username`, up to id `upToId`, reached
+  // `status`. "read" is only sent when both people have read receipts on.
+  | {
+      type: "receipt"
+      username: string
+      status: "delivered" | "read"
+      upToId: number
+    }
   | { type: "error"; status: number; message: string; clientId?: string }
 
 export type ConnectionStatus = "connecting" | "open" | "closed"
@@ -82,6 +94,7 @@ function parseEvent(raw: unknown): ServerEvent | null {
       json.type === "ready" ||
       json.type === "ack" ||
       json.type === "message" ||
+      json.type === "receipt" ||
       json.type === "error"
     ) {
       return json as ServerEvent

@@ -17,7 +17,7 @@ import {
     sendMessage,
     type SentMessage,
 } from "./chat.js";
-
+import { markDelivered, markDeliveredOnConnect } from "./receipts.js";
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
 /* ------------------------------------------------------------------ */
@@ -160,7 +160,7 @@ export async function announceMessage(sent: SentMessage): Promise<void> {
             return;
         }
 
-                // Each side sees the thread under the other person's username.
+        // Each side sees the thread under the other person's username.
         pushToUser(sent.senderId, {
             type: "message",
             username: recipientName,
@@ -171,6 +171,21 @@ export async function announceMessage(sent: SentMessage): Promise<void> {
             username: senderName,
             chatMessage: chatMessageFromSent(sent, false),
         });
+
+        // Delivered = the recipient has at least one open tab right now. The
+        // message events above go out first, so the sender's client already has
+        // the message when the receipt for it arrives.
+        if ((connections.get(sent.recipientId)?.size ?? 0) > 0) {
+            const pushes = await markDelivered(
+                sent.conversationId,
+                sent.senderId,
+                sent.recipientId
+            );
+
+            for (const push of pushes) {
+                pushToUser(push.toUserId, push.event);
+            }
+        }
     } catch (error) {
         console.error("Announce message error:", error);
     }
@@ -358,6 +373,14 @@ export function attachChatSocket(server: Server) {
         socket.on("error", (error) => console.error("Chat socket error:", error));
 
         sendJson(socket, { type: "ready" });
+        // Whatever arrived while this user was offline counts as delivered now.
+markDeliveredOnConnect(socket.userId)
+    .then((pushes) => {
+        for (const push of pushes) {
+            pushToUser(push.toUserId, push.event);
+        }
+    })
+    .catch((error) => console.error("Mark delivered error:", error));
     }
 
     async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {

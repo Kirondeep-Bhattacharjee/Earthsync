@@ -74,6 +74,9 @@ export const profiles = pgTable(
         bio: varchar("bio", { length: 500 }),
         profilePictureKey: varchar("profile_picture_key", { length: 255 }), // R2 object key, null = no picture
         visibility: profileVisibility("visibility").notNull().default("public"),
+        // NEW: when false, others can't see when you read their messages, and
+        // you can't see when they read yours (reciprocal, like WhatsApp).
+        showReadReceipts: boolean("show_read_receipts").notNull().default(true),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()
@@ -260,6 +263,11 @@ export const conversations = pgTable(
         createdAt: timestamp("created_at").defaultNow().notNull(),
         lowReadAt: timestamp("low_read_at"),
         highReadAt: timestamp("high_read_at"),
+        // NEW: everything the OTHER person sent up to this time reached this
+        // user's device (an open socket). Drives the "delivered" tick on the
+        // sender's side. Same low/high pattern as the read markers.
+        lowDeliveredAt: timestamp("low_delivered_at"),
+        highDeliveredAt: timestamp("high_delivered_at"),
         // Set by a report so the retention job keeps this thread as evidence.
         retentionHold: boolean("retention_hold").notNull().default(false),
     },
@@ -304,15 +312,21 @@ export const messages = pgTable(
         keyVersion: smallint("key_version"),
         // The retention job deletes the message first, then its media row.
         mediaId: uuid("media_id")
-        .unique()
-        .references(() => media.id),
+            .unique()
+            .references(() => media.id),
+        // NEW: set when the sender deletes for everyone. Clients get a
+        // placeholder and no content. The content stays for 30 days, then a
+        // purge job nulls body/body_enc/media_id; the row stays so the
+        // "This message was deleted" placeholder survives.
+        deletedForEveryoneAt: timestamp("deleted_for_everyone_at"),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [
         // Text needs a body (plain or encrypted); image and voice need media.
+        // A message deleted for everyone is exempt, so its content can be purged.
         check(
             "messages_content",
-            sql`(${t.kind} = 'text' AND (${t.body} IS NOT NULL OR ${t.bodyEnc} IS NOT NULL)) OR (${t.kind} <> 'text' AND ${t.mediaId} IS NOT NULL)`
+            sql`${t.deletedForEveryoneAt} IS NOT NULL OR (${t.kind} = 'text' AND (${t.body} IS NOT NULL OR ${t.bodyEnc} IS NOT NULL)) OR (${t.kind} <> 'text' AND ${t.mediaId} IS NOT NULL)`
         ),
         // An encrypted body always says which key encrypted it.
         check(
@@ -321,6 +335,10 @@ export const messages = pgTable(
         ),
         // "Latest messages in this conversation" and the id cursor.
         index("messages_conversation_idx").on(t.conversationId, t.id.desc()),
+        // NEW: the purge job only looks at deleted rows.
+        index("messages_deleted_idx")
+            .on(t.deletedForEveryoneAt)
+            .where(sql`${t.deletedForEveryoneAt} IS NOT NULL`),
     ]
 )
 
@@ -350,13 +368,23 @@ export const media = pgTable(
         sizeBytes: bigint("size_bytes", { mode: "number" }),
         width: integer("width"),
         height: integer("height"),
-        durationSeconds: integer("duration_seconds"), // videos only
+        durationSeconds: integer("duration_seconds"), // videos and voice notes
+        // NEW: about 48 peak values (0-255) for the voice-note waveform; null
+        // for anything that is not audio. All zeros means the note is silent.
+        waveform: smallint("waveform").array(),
         status: mediaStatus("status").notNull().default("pending"),
         // SHA-256 of the stored bytes: proves later that evidence is unchanged.
         sha256: varchar("sha256", { length: 64 }),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
-    (t) => [index("media_user_id_idx").on(t.userId)]
+    (t) => [
+        index("media_user_id_idx").on(t.userId),
+        // NEW: keep the waveform small and sane.
+        check(
+            "media_waveform_size",
+            sql`${t.waveform} IS NULL OR cardinality(${t.waveform}) BETWEEN 1 AND 100`
+        ),
+    ]
 )
 
 
@@ -445,5 +473,22 @@ export const postComments = pgTable(
         // Replies of one comment, oldest first.
         index("post_comments_parent_idx").on(t.parentId, t.id),
         index("post_comments_author_idx").on(t.authorId),
+    ]
+)
+
+export const messageDeletions = pgTable(
+    "message_deletions",
+    {
+        messageId: bigint("message_id", { mode: "number" })
+            .notNull()
+            .references(() => messages.id, { onDelete: "cascade" }),
+        userId: integer("user_id")
+            .notNull()
+            .references(() => users.id, { onDelete: "cascade" }),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+    },
+    (t) => [
+        primaryKey({ columns: [t.messageId, t.userId] }),
+        index("message_deletions_user_idx").on(t.userId),
     ]
 )

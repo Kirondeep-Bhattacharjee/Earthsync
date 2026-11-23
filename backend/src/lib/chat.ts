@@ -14,6 +14,7 @@ import { HttpError } from "./http.js";
 import { signChatUrl } from "./r2.js";
 import { areFriends, isBlockedEitherWay } from "./relationships.js";
 import { usernameSchema } from "./username.js";
+import type { ReceiptStatus } from "./receipts.js";
 
 /* ------------------------------------------------------------------ */
 /* Validation                                                          */
@@ -56,6 +57,7 @@ export type ChatMessage = {
     media: ChatMedia | null;
     createdAt: Date;
     fromMe: boolean;
+    status: ReceiptStatus | null; // only for my own messages
 };
 
 export type SentMessage = {
@@ -118,15 +120,19 @@ export function readMessageText(row: StoredMessage): string | null {
 export function serializeMessage(
     row: StoredMessage,
     viewerId: number,
-    media: ChatMedia | null = null
+    media: ChatMedia | null = null,
+    status: ReceiptStatus = "sent"
 ): ChatMessage {
+    const fromMe = row.senderId === viewerId;
+
     return {
         id: row.id,
         kind: row.kind,
         body: row.kind === "text" ? readMessageText(row) : null,
         media,
         createdAt: row.createdAt,
-        fromMe: row.senderId === viewerId,
+        fromMe,
+        status: fromMe ? status : null,
     };
 }
 
@@ -142,6 +148,7 @@ export function chatMessageFromSent(
         media: sent.media,
         createdAt: sent.createdAt,
         fromMe,
+        status: fromMe ? "sent" : null,
     };
 }
 

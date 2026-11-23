@@ -24,8 +24,10 @@ import {
     serializeMessage,
 } from "../lib/chat.js";
 import { areFriends } from "../lib/relationships.js";
-import { announceMessage } from "../lib/socket.js";
+
 import { usernameSchema } from "../lib/username.js";
+import { markRead, peerMarkers, receiptsMutual, statusSql } from "../lib/receipts.js";
+import { announceMessage, pushToUser } from "../lib/socket.js";
 
 const router = Router();
 
@@ -328,6 +330,8 @@ router.get(
 
             const low = Math.min(viewerId, peerId);
             const high = Math.max(viewerId, peerId);
+            const mutual = await receiptsMutual(viewerId, peerId);
+            const peer = peerMarkers(viewerId, peerId);
 
             // My own hidden-before: messages at or before it were deleted for me.
             // Compared in SQL (not round-tripped through JS) so clocks can't disagree.
@@ -354,6 +358,7 @@ router.get(
                     mediaWidth: media.width,
                     mediaHeight: media.height,
                     mediaDuration: media.durationSeconds,
+                    status: statusSql(mutual, peer.delivered, peer.read),
                 })
                 .from(messages)
                 .innerJoin(
@@ -393,7 +398,8 @@ router.get(
                                   height: row.mediaHeight,
                                   durationSeconds: row.mediaDuration,
                               })
-                            : null
+                            : null,
+                        row.status
                     )
                 )
             );
@@ -422,25 +428,17 @@ router.post("/conversations/:username/read", requireAuth, async (req, res) => {
         return res.status(401).json({ message: "Not authenticated" });
     }
 
-    try {
+        try {
         const peerId = await findPeer(viewerId, req.params.username);
 
-        const low = Math.min(viewerId, peerId);
-        const high = Math.max(viewerId, peerId);
+        // Moves my read marker (and delivered) and returns the receipt events
+        // to push to the other person. Both people's rules (blocks, mutual
+        // read receipts) are handled inside markRead.
+        const pushes = await markRead(viewerId, peerId);
 
-        await db
-            .update(conversations)
-            .set(
-                viewerId === low
-                    ? { lowReadAt: sql`now()` }
-                    : { highReadAt: sql`now()` }
-            )
-            .where(
-                and(
-                    eq(conversations.userLowId, low),
-                    eq(conversations.userHighId, high)
-                )
-            );
+        for (const push of pushes) {
+            pushToUser(push.toUserId, push.event);
+        }
 
         return res.json({ message: "Marked as read" });
     } catch (error) {
