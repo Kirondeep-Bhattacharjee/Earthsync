@@ -17,9 +17,11 @@ const accessKeyId = process.env.R2_ACCESS_KEY_ID;
 const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
 const bucket = process.env.R2_BUCKET;
 const postsBucket = process.env.R2_POSTS_BUCKET;
+const chatBucket = process.env.R2_CHAT_BUCKET;
 
 const AVATAR_PREFIX = "avatars/";
 const POSTS_PREFIX = "posts/";
+const CHAT_PREFIX = "chat/";
 
 const client =
     accountId && accessKeyId && secretAccessKey
@@ -49,6 +51,15 @@ function requirePostsStorage() {
     }
 
     return { client, bucket: postsBucket };
+}
+
+function requireChatStorage() {
+    if (!client || !chatBucket) {
+        console.error("R2 chat bucket is not configured: check R2_CHAT_BUCKET");
+        throw new HttpError(503, "File storage is not available");
+    }
+
+    return { client, bucket: chatBucket };
 }
 
 /* ------------------------------------------------------------------ */
@@ -170,6 +181,103 @@ export async function deletePostObjects(keys: string[]): Promise<void> {
             // Never delete anything outside the posts folder.
             if (!key.startsWith(POSTS_PREFIX)) {
                 console.error(`Refusing to delete non-post key: ${key}`);
+                return;
+            }
+
+            try {
+                await storage.client.send(
+                    new DeleteObjectCommand({ Bucket: storage.bucket, Key: key })
+                );
+            } catch (error) {
+                console.error(`R2 delete failed for ${key}:`, error);
+            }
+        })
+    );
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat attachments (private bucket, signed URLs only)                 */
+/* ------------------------------------------------------------------ */
+
+// Shorter than posts: a URL is valid for 30 to 45 minutes from when it is
+// handed out. It is only handed out after the route checked that the viewer
+// is in the conversation and not blocked.
+const CHAT_SIGN_BUCKET_MS = 15 * 60 * 1000;
+const CHAT_SIGN_EXPIRES_SECONDS = 45 * 60;
+
+// Photos get a thumbnail, voice notes don't. Ownership is tracked by the
+// media and messages rows, the user id in the path is only for tidiness.
+export function createChatKeys(
+    userId: number,
+    type: "image" | "audio"
+): { key: string; thumbKey: string | null } {
+    const id = randomUUID();
+
+    if (type === "audio") {
+        return { key: `${CHAT_PREFIX}${userId}/${id}.m4a`, thumbKey: null };
+    }
+
+    return {
+        key: `${CHAT_PREFIX}${userId}/${id}.webp`,
+        thumbKey: `${CHAT_PREFIX}${userId}/${id}-thumb.webp`,
+    };
+}
+
+export async function putChatObject(
+    key: string,
+    body: Buffer,
+    contentType: string
+): Promise<void> {
+    const storage = requireChatStorage();
+
+    await storage.client.send(
+        new PutObjectCommand({
+            Bucket: storage.bucket,
+            Key: key,
+            Body: body,
+            ContentType: contentType,
+            // Private: only signed URLs reach this, and keys never change.
+            CacheControl: "private, max-age=31536000, immutable",
+        })
+    );
+}
+
+// Call this only after the route has decided the viewer may see the message.
+export async function signChatUrl(key: string): Promise<string> {
+    const storage = requireChatStorage();
+
+    return getSignedUrl(
+        storage.client,
+        new GetObjectCommand({ Bucket: storage.bucket, Key: key }),
+        {
+            expiresIn: CHAT_SIGN_EXPIRES_SECONDS,
+            signingDate: new Date(
+                Math.floor(Date.now() / CHAT_SIGN_BUCKET_MS) * CHAT_SIGN_BUCKET_MS
+            ),
+        }
+    );
+}
+
+// Best-effort, like the others: a failed delete leaves an unused file behind
+// and is logged, never thrown. The retention job reuses this.
+export async function deleteChatObjects(keys: string[]): Promise<void> {
+    if (keys.length === 0) {
+        return;
+    }
+
+    let storage: ReturnType<typeof requireChatStorage>;
+
+    try {
+        storage = requireChatStorage();
+    } catch {
+        return;
+    }
+
+    await Promise.all(
+        keys.map(async (key) => {
+            // Never delete anything outside the chat folder.
+            if (!key.startsWith(CHAT_PREFIX)) {
+                console.error(`Refusing to delete non-chat key: ${key}`);
                 return;
             }
 

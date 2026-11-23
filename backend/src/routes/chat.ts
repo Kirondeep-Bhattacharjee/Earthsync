@@ -7,12 +7,14 @@ import {
     blocks,
     conversations,
     friendships,
+    media,
     messages,
     profiles,
 } from "../db/schema.js";
 import { requireAuth } from "../middlewares/requireAuth.js";
 import { handleError, validationError } from "../lib/http.js";
 import {
+    buildChatMedia,
     chatMessageFromSent,
     findPeer,
     messageBodySchema,
@@ -21,6 +23,7 @@ import {
     sendMessage,
     serializeMessage,
 } from "../lib/chat.js";
+import { areFriends } from "../lib/relationships.js";
 import { announceMessage } from "../lib/socket.js";
 import { usernameSchema } from "../lib/username.js";
 
@@ -112,8 +115,10 @@ const sendLimiter = rateLimit({
 /* Send                                                                */
 /* ------------------------------------------------------------------ */
 
-// Send a message to a username. The thread is created on the first message.
-// Friendship is not required; blocked or unknown usernames are a 404.
+// Send a TEXT message to a username. The thread is created on the first
+// message. Friendship is not required for text; blocked or unknown usernames
+// are a 404. Photos and voice notes (friends only) are in
+// routes/chat-attachments.ts.
 router.post("/messages", requireAuth, sendLimiter, async (req, res) => {
     const viewerId = req.session.userId;
 
@@ -297,6 +302,11 @@ router.get("/conversations/unread-count", requireAuth, async (req, res) => {
 // reading order (oldest to newest). `nextCursor` is the id to pass as `before`
 // for the next older page, or null when there is nothing older. No thread yet
 // is an empty page, not an error.
+//
+// `isFriend` tells the client whether photos and voice notes can be sent here.
+// Signed media URLs are made only at the end, after findPeer proved I'm in
+// this thread and not blocked, and only for rows the query let through (so
+// nothing I deleted for myself is signed).
 router.get(
     "/conversations/:username/messages",
     requireAuth,
@@ -339,12 +349,18 @@ router.get(
                     bodyEnc: messages.bodyEnc,
                     keyVersion: messages.keyVersion,
                     createdAt: messages.createdAt,
+                    mediaKey: media.key,
+                    mediaThumbKey: media.thumbKey,
+                    mediaWidth: media.width,
+                    mediaHeight: media.height,
+                    mediaDuration: media.durationSeconds,
                 })
                 .from(messages)
                 .innerJoin(
                     conversations,
                     eq(conversations.id, messages.conversationId)
                 )
+                .leftJoin(media, eq(media.id, messages.mediaId))
                 .where(
                     and(
                         eq(conversations.userLowId, low),
@@ -362,11 +378,30 @@ router.get(
             const page = rows.slice(0, limit);
             const oldest = page[page.length - 1];
 
+            const isFriend = await areFriends(viewerId, peerId);
+
+            const chatMessages = await Promise.all(
+                page.reverse().map(async (row) =>
+                    serializeMessage(
+                        row,
+                        viewerId,
+                        row.mediaKey
+                            ? await buildChatMedia({
+                                  key: row.mediaKey,
+                                  thumbKey: row.mediaThumbKey,
+                                  width: row.mediaWidth,
+                                  height: row.mediaHeight,
+                                  durationSeconds: row.mediaDuration,
+                              })
+                            : null
+                    )
+                )
+            );
+
             return res.json({
-                messages: page
-                    .reverse()
-                    .map((row) => serializeMessage(row, viewerId)),
+                messages: chatMessages,
                 nextCursor: rows.length > limit && oldest ? oldest.id : null,
+                isFriend,
             });
         } catch (error) {
             return handleError(res, error, "Message history");

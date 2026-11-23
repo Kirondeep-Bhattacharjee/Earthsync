@@ -13,6 +13,7 @@ import friendsRouter from "./routes/friends.js";
 import chatRouter from "./routes/chat.js";
 import postsRouter from "./routes/posts.js";
 import postInteractionsRouter from "./routes/post-interactions.js"
+import chatAttachmentsRouter from "./routes/chat-attachments.js";
 
 const app = express();
 
@@ -56,6 +57,7 @@ app.use("/api/dashboard", requireAuth, dashboardRouter);
 app.use("/api", usersRouter);
 app.use("/api", friendsRouter);
 app.use("/api", chatRouter);
+app.use("/api", chatAttachmentsRouter);
 app.use("/api", postsRouter);
 app.use("/api", postInteractionsRouter)
 
