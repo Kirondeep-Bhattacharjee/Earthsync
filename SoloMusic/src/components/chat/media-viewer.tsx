@@ -74,7 +74,7 @@ export function MediaViewer({
           src={src}
           alt={alt}
           onError={onError}
-          className="max-h-[90dvh] max-w-[95vw] rounded-md object-contain select-none"
+          className="max-h-[90dvh] max-w-[95vw] object-contain select-none"
         />
       </DialogContent>
     </Dialog>

@@ -372,7 +372,7 @@ function MessageMenu({
           <Button
             variant="ghost"
             size="icon"
-            className="size-7 shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100"
+            className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100"
           />
         }
       >
@@ -416,7 +416,7 @@ function AttachmentView({
     const picture = (
       <div
         style={{ aspectRatio: frameRatio(media?.width, media?.height) }}
-        className="relative w-64 max-w-full overflow-hidden rounded-lg bg-muted ring-1 ring-black/10 dark:ring-white/10"
+        className="relative w-64 max-w-full overflow-hidden bg-muted ring-1 ring-foreground/10"
       >
         {src && (
           <img
@@ -444,7 +444,7 @@ function AttachmentView({
         type="button"
         aria-label="Open photo"
         onClick={() => onOpenImage(media)}
-        className="block cursor-zoom-in rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="block cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {picture}
       </button>
@@ -1435,6 +1435,7 @@ export default function ChatThread() {
                 // Only saved messages have a menu. Delete for everyone is for
                 // my own messages, within 48 hours, and not already deleted.
                 const canMenu = item.status === "sent" && item.id !== null
+                const isPhoto = item.kind === "image" && !item.deleted
                 const canDeleteForEveryone =
                   canMenu &&
                   item.fromMe &&
@@ -1478,16 +1479,21 @@ export default function ChatThread() {
                           >
                             {item.fromMe && menu}
 
+                            {/* The colored background comes from the Bubble
+                                variant (it paints the content, not this box).
+                                A photo uses the "ghost" variant: no background,
+                                no padding, so the picture is not framed. */}
                             <Bubble
                               align={align}
                               variant={
-                                item.fromMe && !item.deleted ? undefined : "muted"
+                                isPhoto
+                                  ? "ghost"
+                                  : item.fromMe && !item.deleted
+                                    ? undefined
+                                    : "muted"
                               }
                               className={cn(
-                                item.fromMe &&
-                                  !item.deleted &&
-                                  "bg-primary text-primary-foreground",
-                                item.deleted && "bg-muted text-muted-foreground",
+                                item.deleted && "text-muted-foreground",
                                 item.status !== "sent" && "opacity-70"
                               )}
                             >
@@ -1500,11 +1506,15 @@ export default function ChatThread() {
                                   This message was deleted
                                 </BubbleContent>
                               ) : item.kind === "text" ? (
-                                <BubbleContent className="whitespace-pre-wrap break-words">
+                                <BubbleContent className=" whitespace-pre-wrap break-words">
                                   {item.body}
                                 </BubbleContent>
                               ) : (
-                                <BubbleContent className="p-1">
+                                <BubbleContent
+                                  className={
+                                    isPhoto ? "" : " px-2 py-1.5"
+                                  }
+                                >
                                   <AttachmentView
                                     item={item}
                                     onMediaError={refreshMedia}
@@ -1572,7 +1582,7 @@ export default function ChatThread() {
           {/* Only visible once the person scrolls away from the newest message. */}
           <MessageScrollerButton
             size="icon"
-            className="rounded-full shadow-md"
+            className=" shadow-md"
           />
         </MessageScroller>
       </MessageScrollerProvider>
@@ -1600,13 +1610,13 @@ export default function ChatThread() {
 
         {recorder.state === "recording" ? (
           <InputGroup className="h-auto rounded-2xl bg-background p-1.5 shadow-xs">
-            <InputGroupAddon>
+            <InputGroupAddon className="py-0">
               <InputGroupButton
                 className="size-9 rounded-full"
                 aria-label="Cancel recording"
                 onClick={recorder.cancel}
               >
-                <IconTrash aria-hidden="true" />
+                <IconTrash className="size-5" aria-hidden="true" />
               </InputGroupButton>
             </InputGroupAddon>
 
@@ -1624,21 +1634,21 @@ export default function ChatThread() {
               </span>
             </div>
 
-            <InputGroupAddon align="inline-end">
+            <InputGroupAddon align="inline-end" className="py-0">
               <InputGroupButton
                 variant="default"
                 className="size-9 rounded-full"
                 aria-label="Send voice message"
                 onClick={recorder.stop}
               >
-                <IconSend aria-hidden="true" />
+                <IconSend className="size-5" aria-hidden="true" />
               </InputGroupButton>
             </InputGroupAddon>
           </InputGroup>
         ) : (
-          <InputGroup className="items-end rounded-2xl bg-background p-1.5 shadow-xs">
+          <InputGroup className="items-end bg-background p-1.5 shadow-xs">
             {isFriend && (
-              <InputGroupAddon>
+              <InputGroupAddon className="py-0">
                 <InputGroupButton
                   className="size-9 rounded-full"
                   aria-label="Send a photo"
@@ -1647,7 +1657,7 @@ export default function ChatThread() {
                     fileInputRef.current?.click()
                   }}
                 >
-                  <IconPhoto aria-hidden="true" />
+                  <IconPhoto className="size-5" aria-hidden="true" />
                 </InputGroupButton>
               </InputGroupAddon>
             )}
@@ -1669,7 +1679,7 @@ export default function ChatThread() {
 
             {/* With nothing typed, a friend gets the microphone; as soon as
                 there is text, it turns into Send. */}
-            <InputGroupAddon align="inline-end">
+            <InputGroupAddon align="inline-end" className="py-0">
               {isFriend && recorder.supported && draft.trim() === "" ? (
                 <InputGroupButton
                   className="size-9 rounded-full"
@@ -1680,7 +1690,7 @@ export default function ChatThread() {
                     void recorder.start()
                   }}
                 >
-                  <IconMicrophone aria-hidden="true" />
+                  <IconMicrophone className="size-5" aria-hidden="true" />
                 </InputGroupButton>
               ) : (
                 <InputGroupButton
@@ -1690,7 +1700,7 @@ export default function ChatThread() {
                   disabled={draft.trim() === ""}
                   onClick={submit}
                 >
-                  <IconSend aria-hidden="true" />
+                  <IconSend className="size-5" aria-hidden="true" />
                 </InputGroupButton>
               )}
             </InputGroupAddon>
