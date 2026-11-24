@@ -2,6 +2,7 @@ import * as React from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   IconArrowLeft,
+  IconBan,
   IconCheck,
   IconChecks,
   IconDotsVertical,
@@ -38,6 +39,8 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller"
 import { ChatThreadSkeleton } from "@/components/skeletons/chat-thread-skeleton"
+import { MediaViewer } from "@/components/chat/media-viewer"
+import { VoicePlayer } from "@/components/chat/voice-player"
 import {
   IMAGE_MAX_BYTES,
   UploadError,
@@ -71,6 +74,9 @@ const SEND_TIMEOUT_MS = 15_000
 const MEDIA_REFRESH_MS = 20 * 60_000
 // A broken image or audio element triggers a refetch, at most this often.
 const MEDIA_ERROR_REFRESH_GAP_MS = 30_000
+// "Delete for everyone" is only offered this long after sending (the server
+// enforces the same limit; this only decides whether the option is shown).
+const DELETE_FOR_EVERYONE_MS = 48 * 60 * 60 * 1000
 
 /* ------------------------------------------------------------------ */
 /* Types and helpers                                                   */
@@ -99,8 +105,12 @@ type Item = {
   // Delivery state of my own message (sent, delivered, read). Separate from
   // `status`, which is only about the send itself.
   receipt: ReceiptStatus | null
+  // Deleted for everyone: no body, no media, shown as a placeholder.
+  deleted: boolean
   error: string | null
 }
+
+type DeleteScope = "me" | "everyone"
 
 type LoadState =
   | { status: "loading" }
@@ -199,6 +209,7 @@ function fromServer(message: ChatMessage): Item {
     fromMe: message.fromMe,
     status: "sent",
     receipt: message.status,
+    deleted: message.deleted,
     error: null,
   }
 }
@@ -239,6 +250,8 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
             createdAt: message.createdAt,
             status: "sent",
             receipt: maxReceipt(existing.receipt, message.status),
+            // A deleted message never comes back.
+            deleted: existing.deleted || message.deleted,
             error: null,
           }
         : fromServer(message)
@@ -269,9 +282,31 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
   )
 }
 
-/* ------------------------------------------------------------------ */
-/* Page                                                                */
-/* ------------------------------------------------------------------ */
+// Delete for me removes the bubble; delete for everyone keeps it as a
+// "This message was deleted" placeholder.
+function applyDeletion(items: Item[], id: number, scope: DeleteScope): Item[] {
+  if (scope === "me") {
+    return items.filter((item) => item.id !== id)
+  }
+
+  return items.map((item) =>
+    item.id === id ? { ...item, deleted: true, body: null, media: null } : item
+  )
+}
+
+// Photos show in one standard frame. The shape follows the photo but is kept
+// between portrait 3:4 and landscape 8:5, so a very tall or wide picture never
+// takes over the thread (the viewer shows the whole photo).
+function frameRatio(
+  width: number | null | undefined,
+  height: number | null | undefined
+): number {
+  if (!width || !height) {
+    return 4 / 3
+  }
+
+  return Math.min(1.6, Math.max(0.75, width / height))
+}
 
 /* ------------------------------------------------------------------ */
 /* Photo and voice bubbles                                             */
@@ -297,15 +332,55 @@ function ReceiptTicks({ status }: { status: ReceiptStatus }) {
   )
 }
 
+// The vertical three dots next to a bubble. Hidden until hover on a mouse
+// device, always visible on touch screens.
+function MessageMenu({
+  align,
+  onDeleteForMe,
+  onDeleteForEveryone,
+}: {
+  align: "start" | "end"
+  onDeleteForMe: () => void
+  onDeleteForEveryone: (() => void) | null
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Message options"
+        className={cn(
+          buttonVariants({ variant: "ghost", size: "icon" }),
+          "size-7 shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100"
+        )}
+      >
+        <IconDotsVertical className="size-4" aria-hidden="true" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align={align}>
+        <DropdownMenuItem onClick={onDeleteForMe}>
+          <IconTrash aria-hidden="true" />
+          Delete for me
+        </DropdownMenuItem>
+        {onDeleteForEveryone && (
+          <DropdownMenuItem variant="destructive" onClick={onDeleteForEveryone}>
+            <IconTrash aria-hidden="true" />
+            Delete for everyone
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 // The inside of a photo or voice bubble. While an upload is under way there is
 // no server media yet, so a photo is shown from the file on this device.
 // `onMediaError` fires when a signed URL has expired (see refreshMedia).
 function AttachmentView({
   item,
   onMediaError,
+  onOpenImage,
 }: {
   item: Item
   onMediaError: () => void
+  onOpenImage: (media: ChatMedia) => void
 }) {
   const uploading = item.id === null && item.status === "sending"
   const percent = Math.round((item.progress ?? 0) * 100)
@@ -313,29 +388,26 @@ function AttachmentView({
   if (item.kind === "image") {
     const media = item.media
     const src = media?.thumbUrl ?? media?.url ?? item.localUrl
-    // The size is known up front, so the thread does not jump when it loads.
-    const ratio =
-      media?.width && media.height ? `${media.width} / ${media.height}` : undefined
 
     const picture = (
-      <div className="relative">
-        {src ? (
+      <div
+        style={{ aspectRatio: frameRatio(media?.width, media?.height) }}
+        className="relative w-64 max-w-full overflow-hidden rounded-lg bg-muted ring-1 ring-black/10 dark:ring-white/10"
+      >
+        {src && (
           <img
             src={src}
             alt="Photo"
             loading="lazy"
             onError={onMediaError}
-            style={ratio ? { aspectRatio: ratio } : undefined}
-            className="block max-h-72 w-64 max-w-full rounded-md bg-muted object-cover"
+            className="size-full object-cover"
           />
-        ) : (
-          <div className="h-40 w-52 rounded-md bg-muted" />
         )}
 
         {uploading && (
           <div
             role="status"
-            className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60 text-xs font-medium text-foreground"
+            className="absolute inset-0 flex items-center justify-center bg-background/60 text-xs font-medium text-foreground"
           >
             {percent}%
           </div>
@@ -344,15 +416,14 @@ function AttachmentView({
     )
 
     return media ? (
-      <a
-        href={media.url}
-        target="_blank"
-        rel="noopener noreferrer"
+      <button
+        type="button"
         aria-label="Open photo"
-        className="block"
+        onClick={() => onOpenImage(media)}
+        className="block cursor-zoom-in rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         {picture}
-      </a>
+      </button>
     ) : (
       picture
     )
@@ -360,17 +431,12 @@ function AttachmentView({
 
   if (item.media) {
     return (
-      <audio
-        controls
-        preload="metadata"
+      <VoicePlayer
         src={item.media.url}
+        durationSeconds={item.media.durationSeconds}
+        waveform={item.media.waveform}
+        seed={item.id ?? 0}
         onError={onMediaError}
-        aria-label={
-          item.media.durationSeconds
-            ? `Voice message, ${formatDuration(item.media.durationSeconds)}`
-            : "Voice message"
-        }
-        className="h-10 w-60 max-w-full"
       />
     )
   }
@@ -385,6 +451,10 @@ function AttachmentView({
     </div>
   )
 }
+
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
 
 export default function ChatThread() {
   const { username = "" } = useParams<{ username: string }>()
@@ -403,6 +473,17 @@ export default function ChatThread() {
 
   const [composerError, setComposerError] = React.useState<string | null>(null)
   const [floors, setFloors] = React.useState<Floors>({ delivered: 0, read: 0 })
+
+  // The photo open in the full-screen viewer, and the message being deleted.
+  const [viewer, setViewer] = React.useState<ChatMedia | null>(null)
+  const [pendingDelete, setPendingDelete] = React.useState<{
+    item: Item
+    scope: DeleteScope
+  } | null>(null)
+  const [messageDeleting, setMessageDeleting] = React.useState(false)
+  const [messageDeleteError, setMessageDeleteError] = React.useState<
+    string | null
+  >(null)
 
   const abortRef = React.useRef<AbortController | null>(null)
   const nameRef = React.useRef(username)
@@ -529,6 +610,8 @@ export default function ChatThread() {
     setPictureUrl(null)
     setComposerError(null)
     setFloors({ delivered: 0, read: 0 })
+    setViewer(null)
+    setPendingDelete(null)
 
     if (!username) {
       setState({ status: "not-found" })
@@ -692,6 +775,7 @@ export default function ChatThread() {
         fromMe: true,
         status: "sending",
         receipt: null,
+        deleted: false,
         error: null,
       }
 
@@ -807,6 +891,7 @@ export default function ChatThread() {
         fromMe: true,
         status: "sending",
         receipt: null,
+        deleted: false,
         error: null,
       }
 
@@ -966,6 +1051,22 @@ export default function ChatThread() {
         return
       }
 
+      // A message was deleted, here or in another tab, or by the other person.
+      if (event.type === "message_deleted") {
+        if (event.username === username) {
+          setState((previous) =>
+            previous.status === "ready"
+              ? {
+                  ...previous,
+                  items: applyDeletion(previous.items, event.id, event.scope),
+                }
+              : previous
+          )
+        }
+
+        return
+      }
+
       if (event.type === "ack" && event.clientId) {
         const clientId = event.clientId
         const id = event.id
@@ -1050,6 +1151,65 @@ export default function ChatThread() {
     } finally {
       setDeleting(false)
     }
+  }
+
+  // One message: "for me" hides it on this account, "for everyone" (sender only,
+  // within 48 hours) replaces it with a placeholder for both people.
+  async function confirmDeleteMessage() {
+    if (!pendingDelete || pendingDelete.item.id === null) {
+      return
+    }
+
+    const { item, scope } = pendingDelete
+    const id = item.id as number
+
+    setMessageDeleting(true)
+    setMessageDeleteError(null)
+
+    try {
+      const response = await fetch(`${API_URL}/api/messages/${id}?scope=${scope}`, {
+        method: "DELETE",
+        credentials: "include",
+      })
+
+      if (response.status === 401) {
+        setPendingDelete(null)
+        setState({ status: "unauthenticated" })
+        return
+      }
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as {
+          message?: string
+        } | null
+
+        throw new Error(
+          typeof data?.message === "string" && data.message
+            ? data.message
+            : "Could not delete the message. Try again."
+        )
+      }
+
+      setState((previous) =>
+        previous.status === "ready"
+          ? { ...previous, items: applyDeletion(previous.items, id, scope) }
+          : previous
+      )
+      setPendingDelete(null)
+    } catch (error) {
+      setMessageDeleteError(
+        error instanceof Error
+          ? error.message
+          : "Could not delete the message. Try again."
+      )
+    } finally {
+      setMessageDeleting(false)
+    }
+  }
+
+  function askDelete(item: Item, scope: DeleteScope) {
+    setMessageDeleteError(null)
+    setPendingDelete({ item, scope })
   }
 
   /* ---------------------------- render ----------------------------- */
@@ -1193,6 +1353,28 @@ export default function ChatThread() {
                   !isSameDay(items[index - 1].createdAt, item.createdAt)
                 const align = item.fromMe ? "end" : "start"
 
+                // Only saved messages have a menu. Delete for everyone is for
+                // my own messages, within 48 hours, and not already deleted.
+                const canMenu = item.status === "sent" && item.id !== null
+                const canDeleteForEveryone =
+                  canMenu &&
+                  item.fromMe &&
+                  !item.deleted &&
+                  Date.now() - new Date(item.createdAt).getTime() <
+                    DELETE_FOR_EVERYONE_MS
+
+                const menu = canMenu ? (
+                  <MessageMenu
+                    align={item.fromMe ? "end" : "start"}
+                    onDeleteForMe={() => askDelete(item, "me")}
+                    onDeleteForEveryone={
+                      canDeleteForEveryone
+                        ? () => askDelete(item, "everyone")
+                        : null
+                    }
+                  />
+                ) : null
+
                 return (
                   <React.Fragment key={item.key}>
                     {showDay && (
@@ -1209,28 +1391,52 @@ export default function ChatThread() {
                     >
                       <Message align={align}>
                         <MessageContent>
-                          <Bubble
-                            align={align}
-                            variant={item.fromMe ? undefined : "muted"}
+                          <div
                             className={cn(
-                              item.fromMe &&
-                                "bg-primary text-primary-foreground",
-                              item.status !== "sent" && "opacity-70"
+                              "group/msg flex items-center gap-1",
+                              item.fromMe ? "justify-end" : "justify-start"
                             )}
                           >
-                            {item.kind === "text" ? (
-                              <BubbleContent className="whitespace-pre-wrap break-words">
-                                {item.body}
-                              </BubbleContent>
-                            ) : (
-                              <BubbleContent className="p-1">
-                                <AttachmentView
-                                  item={item}
-                                  onMediaError={refreshMedia}
-                                />
-                              </BubbleContent>
-                            )}
-                          </Bubble>
+                            {item.fromMe && menu}
+
+                            <Bubble
+                              align={align}
+                              variant={
+                                item.fromMe && !item.deleted ? undefined : "muted"
+                              }
+                              className={cn(
+                                item.fromMe &&
+                                  !item.deleted &&
+                                  "bg-primary text-primary-foreground",
+                                item.deleted && "bg-muted text-muted-foreground",
+                                item.status !== "sent" && "opacity-70"
+                              )}
+                            >
+                              {item.deleted ? (
+                                <BubbleContent className="flex items-center gap-1.5 italic">
+                                  <IconBan
+                                    className="size-4 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  This message was deleted
+                                </BubbleContent>
+                              ) : item.kind === "text" ? (
+                                <BubbleContent className="whitespace-pre-wrap break-words">
+                                  {item.body}
+                                </BubbleContent>
+                              ) : (
+                                <BubbleContent className="p-1">
+                                  <AttachmentView
+                                    item={item}
+                                    onMediaError={refreshMedia}
+                                    onOpenImage={setViewer}
+                                  />
+                                </BubbleContent>
+                              )}
+                            </Bubble>
+
+                            {!item.fromMe && menu}
+                          </div>
 
                           <div
                             className={cn(
@@ -1267,7 +1473,7 @@ export default function ChatThread() {
                                 <time dateTime={item.createdAt}>
                                   {formatClock(item.createdAt)}
                                 </time>
-                                {item.fromMe && (
+                                {item.fromMe && !item.deleted && (
                                   <ReceiptTicks status={receiptFor(item, floors)} />
                                 )}
                               </>
@@ -1405,6 +1611,55 @@ export default function ChatThread() {
           </div>
         )}
       </div>
+
+      {viewer && (
+        <MediaViewer
+          src={viewer.url}
+          onClose={() => setViewer(null)}
+          onError={refreshMedia}
+        />
+      )}
+
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !messageDeleting) {
+            setPendingDelete(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingDelete?.scope === "everyone"
+                ? "Delete for everyone?"
+                : "Delete for you?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.scope === "everyone"
+                ? `This replaces the message with "This message was deleted" for you and @${username}. You can only do this within 48 hours of sending.`
+                : `This removes the message from your chat only. @${username} can still see it.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {messageDeleteError && (
+            <p role="alert" className="text-sm text-destructive">
+              {messageDeleteError}
+            </p>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={messageDeleting}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={messageDeleting}
+              onClick={() => void confirmDeleteMessage()}
+            >
+              {messageDeleting ? "Deleting…" : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={deleteOpen}

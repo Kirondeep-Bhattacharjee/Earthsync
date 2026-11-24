@@ -8,12 +8,19 @@ import { useAuth } from "@/lib/auth"
 
 // Signed URLs for one photo or voice note. They expire after 30 to 45 minutes,
 // so a page that stays open refetches (see refreshMedia in chat-thread.tsx).
+
+
+// Delivery state of one of MY messages. It only ever moves forward.
+
+
 export type ChatMedia = {
   url: string
   thumbUrl: string | null
   width: number | null
   height: number | null
   durationSeconds: number | null
+  // About 48 peaks (0-255) for voice notes, null for photos and old notes.
+  waveform: number[] | null
 }
 
 // Delivery state of one of MY messages. It only ever moves forward.
@@ -22,11 +29,12 @@ export type ReceiptStatus = "sent" | "delivered" | "read"
 export type ChatMessage = {
   id: number
   kind: "text" | "image" | "voice"
-  body: string | null // null for photos and voice notes
+  body: string | null // null for photos, voice notes and deleted messages
   media: ChatMedia | null
   createdAt: string
   fromMe: boolean
   status: ReceiptStatus | null // only for my own messages
+  deleted: boolean // deleted for everyone: body and media are null
 }
 
 export type ServerEvent =
@@ -40,6 +48,14 @@ export type ServerEvent =
       username: string
       status: "delivered" | "read"
       upToId: number
+    }
+  // A message in the thread with `username` was deleted. "me" removes it,
+  // "everyone" turns it into a placeholder.
+  | {
+      type: "message_deleted"
+      username: string
+      id: number
+      scope: "me" | "everyone"
     }
   | { type: "error"; status: number; message: string; clientId?: string }
 
@@ -90,11 +106,12 @@ function parseEvent(raw: unknown): ServerEvent | null {
   try {
     const json = JSON.parse(raw) as { type?: unknown }
 
-    if (
+      if (
       json.type === "ready" ||
       json.type === "ack" ||
       json.type === "message" ||
       json.type === "receipt" ||
+      json.type === "message_deleted" ||
       json.type === "error"
     ) {
       return json as ServerEvent
