@@ -1,11 +1,15 @@
 import * as React from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
+  IconAlertCircle,
   IconArrowLeft,
   IconBan,
   IconCheck,
   IconChecks,
   IconDotsVertical,
+  IconLock,
+  IconMessage,
+  IconMessageOff,
   IconMicrophone,
   IconPhoto,
   IconSend,
@@ -20,15 +24,31 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from "@/components/ui/input-group"
 import { Message, MessageContent } from "@/components/ui/message"
 import {
   MessageScroller,
@@ -37,6 +57,7 @@ import {
   MessageScrollerItem,
   MessageScrollerProvider,
   MessageScrollerViewport,
+  useMessageScroller,
 } from "@/components/ui/message-scroller"
 import { ChatThreadSkeleton } from "@/components/skeletons/chat-thread-skeleton"
 import { MediaViewer } from "@/components/chat/media-viewer"
@@ -347,10 +368,13 @@ function MessageMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label="Message options"
-        className={cn(
-          buttonVariants({ variant: "ghost", size: "icon" }),
-          "size-7 shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100"
-        )}
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity group-hover/msg:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 [@media(hover:none)]:opacity-100"
+          />
+        }
       >
         <IconDotsVertical className="size-4" aria-hidden="true" />
       </DropdownMenuTrigger>
@@ -452,6 +476,22 @@ function AttachmentView({
   )
 }
 
+// Sending anything (text, photo, voice) jumps to the newest message, like
+// WhatsApp, even when the person had scrolled up to read older ones. It has to
+// be its own component because useMessageScroller only works inside the
+// MessageScrollerProvider that the page renders.
+function ScrollToEndOnSend({ token }: { token: number }) {
+  const { scrollToEnd } = useMessageScroller()
+
+  React.useEffect(() => {
+    if (token > 0) {
+      scrollToEnd({ behavior: "auto" })
+    }
+  }, [token, scrollToEnd])
+
+  return null
+}
+
 /* ------------------------------------------------------------------ */
 /* Page                                                                */
 /* ------------------------------------------------------------------ */
@@ -472,6 +512,8 @@ export default function ChatThread() {
   const [deleteError, setDeleteError] = React.useState<string | null>(null)
 
   const [composerError, setComposerError] = React.useState<string | null>(null)
+  // Bumped every time I send something, so the thread scrolls to the bottom.
+  const [sendToken, setSendToken] = React.useState(0)
   const [floors, setFloors] = React.useState<Floors>({ delivered: 0, read: 0 })
 
   // The photo open in the full-screen viewer, and the message being deleted.
@@ -784,6 +826,7 @@ export default function ChatThread() {
           ? { ...previous, items: [...previous.items, item] }
           : previous
       )
+      setSendToken((token) => token + 1)
 
       if (!send(username, body, clientId)) {
         patchItem(clientId, {
@@ -901,6 +944,7 @@ export default function ChatThread() {
           ? { ...previous, items: [...previous.items, pending] }
           : previous
       )
+      setSendToken((token) => token + 1)
 
       // A failed upload keeps its preview so Retry can show it again.
       let keepPreview = false
@@ -1220,46 +1264,69 @@ export default function ChatThread() {
 
   if (state.status === "unauthenticated") {
     return (
-      <div
-        className="mx-auto flex w-full max-w-2xl flex-col items-start gap-3 text-sm"
-        role="alert"
-      >
-        <p>Your session expired. Sign in again to see this chat.</p>
-        <Link to="/sign-in" className={buttonVariants({ size: "sm" })}>
-          Sign in
-        </Link>
-      </div>
+      <Empty role="alert" className="mx-auto max-w-2xl">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <IconLock aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>Session expired</EmptyTitle>
+          <EmptyDescription>
+            Your session expired. Sign in again to see this chat.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button size="sm" nativeButton={false} render={<Link to="/sign-in" />}>
+            Sign in
+          </Button>
+        </EmptyContent>
+      </Empty>
     )
   }
 
   if (state.status === "not-found") {
     return (
-      <div
-        className="mx-auto flex w-full max-w-2xl flex-col items-start gap-3 text-sm"
-        role="alert"
-      >
-        <p>This conversation is not available.</p>
-        <Link
-          to="/chats"
-          className={buttonVariants({ variant: "outline", size: "sm" })}
-        >
-          Back to chats
-        </Link>
-      </div>
+      <Empty role="alert" className="mx-auto max-w-2xl">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <IconMessageOff aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>Conversation not available</EmptyTitle>
+          <EmptyDescription>
+            This conversation is not available.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button
+            variant="outline"
+            size="sm"
+            nativeButton={false}
+            render={<Link to="/chats" />}
+          >
+            Back to chats
+          </Button>
+        </EmptyContent>
+      </Empty>
     )
   }
 
   if (state.status === "error") {
     return (
-      <div
-        className="mx-auto flex w-full max-w-2xl flex-col items-start gap-3 text-sm"
-        role="alert"
-      >
-        <p>Could not load this chat. Check your connection and try again.</p>
-        <Button size="sm" variant="outline" onClick={() => void loadLatest()}>
-          Try again
-        </Button>
-      </div>
+      <Empty role="alert" className="mx-auto max-w-2xl">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <IconAlertCircle aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>Could not load this chat</EmptyTitle>
+          <EmptyDescription>
+            Check your connection and try again.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button size="sm" variant="outline" onClick={() => void loadLatest()}>
+            Try again
+          </Button>
+        </EmptyContent>
+      </Empty>
     )
   }
 
@@ -1271,13 +1338,15 @@ export default function ChatThread() {
       className="flex h-full min-h-0 w-full flex-col bg-background"
     >
       <header className="flex shrink-0 items-center gap-2 border-b bg-card/80 px-2 py-2.5 backdrop-blur sm:px-4">
-        <Link
-          to="/chats"
+        <Button
+          variant="ghost"
+          size="icon"
           aria-label="Back to chats"
-          className={buttonVariants({ variant: "ghost", size: "icon" })}
+          nativeButton={false}
+          render={<Link to="/chats" />}
         >
           <IconArrowLeft aria-hidden="true" />
-        </Link>
+        </Button>
 
         <Link
           to={`/u/${username}`}
@@ -1290,11 +1359,10 @@ export default function ChatThread() {
           <span className="truncate font-medium">@{username}</span>
         </Link>
 
-        {/* The trigger renders its own button (no asChild or render, Base UI flavor). */}
         <DropdownMenu>
           <DropdownMenuTrigger
             aria-label="Chat options"
-            className={buttonVariants({ variant: "ghost", size: "icon" })}
+            render={<Button variant="ghost" size="icon" />}
           >
             <IconDotsVertical aria-hidden="true" />
           </DropdownMenuTrigger>
@@ -1311,18 +1379,23 @@ export default function ChatThread() {
       </header>
 
       {socketStatus === "closed" && (
-        <p
+        <Alert
           role="status"
-          className="shrink-0 border-b bg-muted px-3 py-1.5 text-center text-xs text-muted-foreground"
+          className="shrink-0 justify-items-center rounded-none border-x-0 border-t-0 bg-muted py-1.5"
         >
-          Reconnecting. Messages may fail to send.
-        </p>
+          <AlertDescription className="justify-items-center">
+            Reconnecting. Messages may fail to send.
+          </AlertDescription>
+        </Alert>
       )}
 
       <MessageScrollerProvider autoScroll>
+        <ScrollToEndOnSend token={sendToken} />
+
         <MessageScroller className="min-h-0 flex-1">
           <MessageScrollerViewport>
-            <MessageScrollerContent className="px-3 py-4 sm:px-6">
+            {/* justify-end keeps a short thread at the bottom, like WhatsApp. */}
+            <MessageScrollerContent className="justify-end px-3 py-4 sm:px-6">
               {nextCursor !== null && (
                 <div className="flex justify-center pb-4">
                   <Button
@@ -1342,9 +1415,15 @@ export default function ChatThread() {
               )}
 
               {items.length === 0 && (
-                <p className="py-16 text-center text-sm text-muted-foreground">
-                  No messages yet. Say hello to @{username}.
-                </p>
+                <Empty className="py-16">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <IconMessage aria-hidden="true" />
+                    </EmptyMedia>
+                    <EmptyTitle>No messages yet</EmptyTitle>
+                    <EmptyDescription>Say hello to @{username}.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               )}
 
               {items.map((item, index) => {
@@ -1379,16 +1458,16 @@ export default function ChatThread() {
                   <React.Fragment key={item.key}>
                     {showDay && (
                       <div className="my-3 flex justify-center">
-                        <span className="rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
+                        <Badge variant="secondary" className="rounded-full px-3">
                           {formatDayLabel(item.createdAt)}
-                        </span>
+                        </Badge>
                       </div>
                     )}
 
-                    <MessageScrollerItem
-                      messageId={item.key}
-                      scrollAnchor={item.fromMe}
-                    >
+                    {/* No scrollAnchor: it pins a new message to the TOP of the
+                        view with blank space below (AI-chat behavior). A chat
+                        wants the newest message at the bottom. */}
+                    <MessageScrollerItem messageId={item.key}>
                       <Message align={align}>
                         <MessageContent>
                           <div
@@ -1451,20 +1530,22 @@ export default function ChatThread() {
                                 <span className="text-destructive">
                                   {item.error}
                                 </span>
-                                <button
-                                  type="button"
-                                  className="underline underline-offset-2 hover:text-foreground"
+                                <Button
+                                  variant="link"
+                                  size="xs"
+                                  className="h-auto p-0 text-xs text-muted-foreground hover:text-foreground"
                                   onClick={() => retry(item)}
                                 >
                                   Retry
-                                </button>
-                                <button
-                                  type="button"
-                                  className="underline underline-offset-2 hover:text-foreground"
+                                </Button>
+                                <Button
+                                  variant="link"
+                                  size="xs"
+                                  className="h-auto p-0 text-xs text-muted-foreground hover:text-foreground"
                                   onClick={() => discard(item)}
                                 >
                                   Discard
-                                </button>
+                                </Button>
                               </>
                             )}
 
@@ -1488,7 +1569,11 @@ export default function ChatThread() {
             </MessageScrollerContent>
           </MessageScrollerViewport>
 
-          <MessageScrollerButton />
+          {/* Only visible once the person scrolls away from the newest message. */}
+          <MessageScrollerButton
+            size="icon"
+            className="rounded-full shadow-md"
+          />
         </MessageScroller>
       </MessageScrollerProvider>
 
@@ -1496,9 +1581,9 @@ export default function ChatThread() {
           iPhone home bar (needs viewport-fit=cover in index.html). */}
       <div className="shrink-0 border-t bg-card p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-3">
         {(composerError ?? recorder.error) && (
-          <p role="alert" className="mb-2 px-2 text-xs text-destructive">
-            {composerError ?? recorder.error}
-          </p>
+          <Alert variant="destructive" className="mb-2">
+            <AlertDescription>{composerError ?? recorder.error}</AlertDescription>
+          </Alert>
         )}
 
         {/* Photos and voice notes are friends only (the server enforces it
@@ -1514,16 +1599,16 @@ export default function ChatThread() {
         />
 
         {recorder.state === "recording" ? (
-          <div className="flex items-center gap-2 rounded-2xl border bg-background p-1.5 shadow-xs">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-9 shrink-0 rounded-full"
-              aria-label="Cancel recording"
-              onClick={recorder.cancel}
-            >
-              <IconTrash aria-hidden="true" />
-            </Button>
+          <InputGroup className="h-auto rounded-2xl bg-background p-1.5 shadow-xs">
+            <InputGroupAddon>
+              <InputGroupButton
+                className="size-9 rounded-full"
+                aria-label="Cancel recording"
+                onClick={recorder.cancel}
+              >
+                <IconTrash aria-hidden="true" />
+              </InputGroupButton>
+            </InputGroupAddon>
 
             <div
               role="status"
@@ -1539,38 +1624,39 @@ export default function ChatThread() {
               </span>
             </div>
 
-            <Button
-              size="icon"
-              className="size-9 shrink-0 rounded-full"
-              aria-label="Send voice message"
-              onClick={recorder.stop}
-            >
-              <IconSend aria-hidden="true" />
-            </Button>
-          </div>
-        ) : (
-          <div className="flex items-end gap-2 rounded-2xl border bg-background p-1.5 shadow-xs focus-within:ring-2 focus-within:ring-ring/50">
-            {isFriend && (
-              <Button
-                size="icon"
-                variant="ghost"
-                className="size-9 shrink-0 rounded-full"
-                aria-label="Send a photo"
-                onClick={() => {
-                  setComposerError(null)
-                  fileInputRef.current?.click()
-                }}
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                variant="default"
+                className="size-9 rounded-full"
+                aria-label="Send voice message"
+                onClick={recorder.stop}
               >
-                <IconPhoto aria-hidden="true" />
-              </Button>
+                <IconSend aria-hidden="true" />
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+        ) : (
+          <InputGroup className="items-end rounded-2xl bg-background p-1.5 shadow-xs">
+            {isFriend && (
+              <InputGroupAddon>
+                <InputGroupButton
+                  className="size-9 rounded-full"
+                  aria-label="Send a photo"
+                  onClick={() => {
+                    setComposerError(null)
+                    fileInputRef.current?.click()
+                  }}
+                >
+                  <IconPhoto aria-hidden="true" />
+                </InputGroupButton>
+              </InputGroupAddon>
             )}
 
-            {/* Plain textarea: the shadcn Textarea has its own min height, which
-                pushed the text to the top. h-9 and py-2 match the 36px send
-                button, so one line is centered and it grows upward from there.
-                text-base on mobile: iPhone Safari zooms the page on focus when
-                an input's text is under 16px. */}
-            <textarea
+            {/* min-h-9 and py-2 match the 36px buttons, so one line is
+                centered and the box grows upward from there. text-base on
+                mobile: iPhone Safari zooms the page on focus when an input's
+                text is under 16px. */}
+            <InputGroupTextarea
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={onComposerKeyDown}
@@ -1578,37 +1664,37 @@ export default function ChatThread() {
               aria-label="Message"
               rows={1}
               maxLength={MAX_LENGTH}
-              className="max-h-32 min-h-9 min-w-0 flex-1 resize-none bg-transparent px-2 py-2 text-base leading-5 outline-none [field-sizing:content] placeholder:text-muted-foreground md:text-sm"
+              className="max-h-32 min-h-9 min-w-0 px-2 py-2 text-base leading-5 md:text-sm"
             />
 
             {/* With nothing typed, a friend gets the microphone; as soon as
                 there is text, it turns into Send. */}
-            {isFriend && recorder.supported && draft.trim() === "" ? (
-              <Button
-                size="icon"
-                variant="ghost"
-                className="size-9 shrink-0 rounded-full"
-                aria-label="Record a voice message"
-                disabled={recorder.state === "starting"}
-                onClick={() => {
-                  setComposerError(null)
-                  void recorder.start()
-                }}
-              >
-                <IconMicrophone aria-hidden="true" />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                className="size-9 shrink-0 rounded-full"
-                aria-label="Send message"
-                disabled={draft.trim() === ""}
-                onClick={submit}
-              >
-                <IconSend aria-hidden="true" />
-              </Button>
-            )}
-          </div>
+            <InputGroupAddon align="inline-end">
+              {isFriend && recorder.supported && draft.trim() === "" ? (
+                <InputGroupButton
+                  className="size-9 rounded-full"
+                  aria-label="Record a voice message"
+                  disabled={recorder.state === "starting"}
+                  onClick={() => {
+                    setComposerError(null)
+                    void recorder.start()
+                  }}
+                >
+                  <IconMicrophone aria-hidden="true" />
+                </InputGroupButton>
+              ) : (
+                <InputGroupButton
+                  variant="default"
+                  className="size-9 rounded-full"
+                  aria-label="Send message"
+                  disabled={draft.trim() === ""}
+                  onClick={submit}
+                >
+                  <IconSend aria-hidden="true" />
+                </InputGroupButton>
+              )}
+            </InputGroupAddon>
+          </InputGroup>
         )}
       </div>
 

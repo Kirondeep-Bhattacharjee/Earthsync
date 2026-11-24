@@ -3,6 +3,7 @@ import {
   IconPlayerPauseFilled,
   IconPlayerPlayFilled,
 } from "@tabler/icons-react"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 // Save as src/components/chat/voice-player.tsx
@@ -192,18 +193,19 @@ export function VoicePlayer({
         }}
       />
 
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="icon-lg"
         onClick={toggle}
         aria-label={playing ? "Pause voice message" : "Play voice message"}
-        className="flex size-9 shrink-0 items-center justify-center rounded-full bg-current/15 outline-none transition-colors hover:bg-current/25 focus-visible:ring-2 focus-visible:ring-ring"
+        className="shrink-0 rounded-full bg-current/15 text-current hover:bg-current/25 hover:text-current dark:hover:bg-current/25"
       >
         {playing ? (
           <IconPlayerPauseFilled className="size-4" aria-hidden="true" />
         ) : (
           <IconPlayerPlayFilled className="size-4" aria-hidden="true" />
         )}
-      </button>
+      </Button>
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div
