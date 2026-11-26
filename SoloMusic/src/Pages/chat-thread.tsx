@@ -13,6 +13,8 @@ import {
   IconMessageOff,
   IconMicrophone,
   IconPhoto,
+  IconPin,
+  IconPinnedOff,
   IconSend,
   IconTrash,
   IconX,
@@ -63,6 +65,7 @@ import {
 } from "@/components/ui/message-scroller"
 import { ChatThreadSkeleton } from "@/components/skeletons/chat-thread-skeleton"
 import { MediaViewer } from "@/components/chat/media-viewer"
+import { PinnedBar } from "@/components/chat/pinned-bar"
 import { VoicePlayer } from "@/components/chat/voice-player"
 import {
   IMAGE_MAX_BYTES,
@@ -71,6 +74,12 @@ import {
   uploadAttachment,
   type AttachmentKind,
 } from "@/lib/chat-attachment"
+import {
+  PinError,
+  fetchPins,
+  setPinned,
+  type PinnedMessage,
+} from "@/lib/chat-pins"
 import {
   useChatSocket,
   type ChatMedia,
@@ -434,13 +443,18 @@ function ReceiptTicks({ status }: { status: ReceiptStatus }) {
 // device, always visible on touch screens.
 function MessageMenu({
   align,
+  pinned,
   onReply,
+  onTogglePin,
   onDeleteForMe,
   onDeleteForEveryone,
 }: {
   align: "start" | "end"
-  // Null for a message that can't be replied to (a deleted one).
+  // Whether this message is pinned right now (the item reads Unpin instead).
+  pinned: boolean
+  // Null for a message that can't be replied to or pinned (a deleted one).
   onReply: (() => void) | null
+  onTogglePin: (() => void) | null
   onDeleteForMe: () => void
   onDeleteForEveryone: (() => void) | null
 }) {
@@ -463,6 +477,16 @@ function MessageMenu({
           <DropdownMenuItem onClick={onReply}>
             <IconArrowBackUp aria-hidden="true" />
             Reply
+          </DropdownMenuItem>
+        )}
+        {onTogglePin && (
+          <DropdownMenuItem onClick={onTogglePin}>
+            {pinned ? (
+              <IconPinnedOff aria-hidden="true" />
+            ) : (
+              <IconPin aria-hidden="true" />
+            )}
+            {pinned ? "Unpin" : "Pin"}
           </DropdownMenuItem>
         )}
         <DropdownMenuItem onClick={onDeleteForMe}>
@@ -603,9 +627,12 @@ export default function ChatThread() {
   const [floors, setFloors] = React.useState<Floors>({ delivered: 0, read: 0 })
 
   // The message I am replying to (shown above the composer), and the message
-  // that is briefly highlighted after tapping a quote.
+  // that is briefly highlighted after tapping a quote or the pinned bar.
   const [replyingTo, setReplyingTo] = React.useState<Item | null>(null)
   const [highlightId, setHighlightId] = React.useState<number | null>(null)
+
+  // The pinned messages of this chat (shared by both people), newest pin first.
+  const [pins, setPins] = React.useState<PinnedMessage[]>([])
 
   // The photo open in the full-screen viewer, and the message being deleted.
   const [viewer, setViewer] = React.useState<ChatMedia | null>(null)
@@ -635,6 +662,12 @@ export default function ChatThread() {
   const items = state.status === "ready" ? state.items : NO_ITEMS
   const nextCursor = state.status === "ready" ? state.nextCursor : null
   const isFriend = state.status === "ready" ? state.isFriend : false
+
+  // Ids of the pinned messages, for the menu (Pin / Unpin) and the pin icon.
+  const pinnedIds = React.useMemo(
+    () => new Set(pins.map((pin) => pin.id)),
+    [pins]
+  )
 
   React.useEffect(() => {
     cursorRef.current = nextCursor
@@ -712,6 +745,22 @@ export default function ChatThread() {
     [username]
   )
 
+  // The pinned bar is best effort: if this fails the thread still works, and
+  // the next pin event or reconnect tries again.
+  const loadPins = React.useCallback(async () => {
+    const requestedFor = username
+
+    try {
+      const list = await fetchPins(requestedFor)
+
+      if (nameRef.current === requestedFor) {
+        setPins(list)
+      }
+    } catch {
+      // Keep whatever is shown.
+    }
+  }, [username])
+
   const seenReconnectRef = React.useRef(reconnectCount)
 
   // Tells the server everything in this thread has been seen, then refreshes the
@@ -760,6 +809,7 @@ export default function ChatThread() {
     setPendingDelete(null)
     setReplyingTo(null)
     setHighlightId(null)
+    setPins([])
 
     if (!username) {
       setState({ status: "not-found" })
@@ -767,6 +817,7 @@ export default function ChatThread() {
     }
 
     void loadLatest()
+    void loadPins()
 
     // The header picture is best effort: the thread works without it.
     const profileController = new AbortController()
@@ -785,7 +836,7 @@ export default function ChatThread() {
       abortRef.current?.abort()
       profileController.abort()
     }
-  }, [username, loadLatest])
+  }, [username, loadLatest, loadPins])
 
   // Signed media URLs expire. Refetch the newest page (which brings fresh URLs)
   // every 20 minutes while the tab is visible, and when the tab comes back after
@@ -830,9 +881,10 @@ export default function ChatThread() {
     if (reconnectCount !== seenReconnectRef.current) {
       seenReconnectRef.current = reconnectCount
       void loadLatest({ quiet: true })
+      void loadPins()
       markRead()
     }
-  }, [reconnectCount, loadLatest, markRead])
+  }, [reconnectCount, loadLatest, loadPins, markRead])
 
   // The scroller keeps the view in place when older messages are added on top.
   async function loadOlder() {
@@ -878,9 +930,9 @@ export default function ChatThread() {
     }
   }
 
-  // Tapping a quote: scroll to the original and highlight it. If it is older
-  // than what is loaded, load older pages until it shows up (up to
-  // MAX_JUMP_PAGES), then scroll to it.
+  // Tapping a quote or the pinned bar: scroll to the original and highlight it.
+  // If it is older than what is loaded, load older pages until it shows up (up
+  // to MAX_JUMP_PAGES), then scroll to it.
   const jumpToMessage = React.useCallback(
     async (id: number) => {
       if (jumpingRef.current) {
@@ -1297,6 +1349,15 @@ export default function ChatThread() {
         return
       }
 
+      // A message was pinned or unpinned, by me in another tab or by them.
+      if (event.type === "message_pinned") {
+        if (event.username === username) {
+          void loadPins()
+        }
+
+        return
+      }
+
       // A message was deleted, here or in another tab, or by the other person.
       if (event.type === "message_deleted") {
         if (event.username === username) {
@@ -1311,10 +1372,12 @@ export default function ChatThread() {
               : previous
           )
 
-          // Don't keep a reply open to a message that no longer exists.
+          // Don't keep a reply open to a message that no longer exists, and a
+          // deleted message can't stay in the pinned bar.
           setReplyingTo((current) =>
             current && current.id === deletedId ? null : current
           )
+          setPins((current) => current.filter((pin) => pin.id !== deletedId))
         }
 
         return
@@ -1362,7 +1425,7 @@ export default function ChatThread() {
         }
       }
     })
-  }, [subscribe, username, clearTimer, patchItem, markRead])
+  }, [subscribe, username, clearTimer, patchItem, markRead, loadPins])
 
   React.useEffect(() => {
     const timers = timersRef.current
@@ -1451,6 +1514,7 @@ export default function ChatThread() {
       setReplyingTo((current) =>
         current && current.id === id ? null : current
       )
+      setPins((current) => current.filter((pin) => pin.id !== id))
       setPendingDelete(null)
     } catch (error) {
       setMessageDeleteError(
@@ -1466,6 +1530,30 @@ export default function ChatThread() {
   function askDelete(item: Item, scope: DeleteScope) {
     setMessageDeleteError(null)
     setPendingDelete({ item, scope })
+  }
+
+  /* ------------------------------ pin ------------------------------ */
+
+  // Pins or unpins one saved message, then refreshes the bar. The server also
+  // pushes a message_pinned event to both people, so the other person's bar
+  // updates too. A full chat (3 pins) shows the server's own message.
+  async function togglePin(item: Item, pin: boolean) {
+    if (item.id === null) {
+      return
+    }
+
+    setComposerError(null)
+
+    try {
+      await setPinned(item.id, pin)
+      await loadPins()
+    } catch (error) {
+      setComposerError(
+        error instanceof PinError
+          ? error.message
+          : "Could not update the pin. Try again."
+      )
+    }
   }
 
   /* ---------------------------- render ----------------------------- */
@@ -1590,6 +1678,9 @@ export default function ChatThread() {
         </DropdownMenu>
       </header>
 
+      {/* Pinned messages of this chat. Tapping jumps to the message. */}
+      <PinnedBar pins={pins} onJump={(id) => void jumpToMessage(id)} />
+
       {socketStatus === "closed" && (
         <Alert
           role="status"
@@ -1648,6 +1739,7 @@ export default function ChatThread() {
                 // my own messages, within 48 hours, and not already deleted.
                 const canMenu = item.status === "sent" && item.id !== null
                 const isPhoto = item.kind === "image" && !item.deleted
+                const isPinned = item.id !== null && pinnedIds.has(item.id)
                 const canDeleteForEveryone =
                   canMenu &&
                   item.fromMe &&
@@ -1658,7 +1750,11 @@ export default function ChatThread() {
                 const menu = canMenu ? (
                   <MessageMenu
                     align={item.fromMe ? "end" : "start"}
+                    pinned={isPinned}
                     onReply={item.deleted ? null : () => setReplyingTo(item)}
+                    onTogglePin={
+                      item.deleted ? null : () => void togglePin(item, !isPinned)
+                    }
                     onDeleteForMe={() => askDelete(item, "me")}
                     onDeleteForEveryone={
                       canDeleteForEveryone
@@ -1811,6 +1907,19 @@ export default function ChatThread() {
 
                             {item.status === "sent" && (
                               <>
+                                {isPinned && !item.deleted && (
+                                  <span
+                                    role="img"
+                                    aria-label="Pinned"
+                                    title="Pinned"
+                                    className="inline-flex items-center"
+                                  >
+                                    <IconPin
+                                      className="size-3.5"
+                                      aria-hidden="true"
+                                    />
+                                  </span>
+                                )}
                                 <time dateTime={item.createdAt}>
                                   {formatClock(item.createdAt)}
                                 </time>

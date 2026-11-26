@@ -15,6 +15,7 @@ import postsRouter from "./routes/posts.js";
 import postInteractionsRouter from "./routes/post-interactions.js"
 import chatAttachmentsRouter from "./routes/chat-attachments.js";
 import settingsRouter from "./routes/settings.js";
+import chatSettingsRouter from "./routes/chat-settings.js";
 
 const app = express();
 
@@ -60,6 +61,7 @@ app.use("/api", friendsRouter);
 app.use("/api", chatRouter);
 app.use("/api", chatAttachmentsRouter);
 app.use("/api", settingsRouter);
+app.use("/api", chatSettingsRouter);
 app.use("/api", postsRouter);
 app.use("/api", postInteractionsRouter)
 

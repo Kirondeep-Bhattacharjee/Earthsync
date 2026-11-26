@@ -66,6 +66,8 @@ export type ServerEvent =
       id: number
       scope: "me" | "everyone"
     }
+  // A message in the thread with `username` was pinned or unpinned.
+  | { type: "message_pinned"; username: string; id: number; pinned: boolean }
   | { type: "error"; status: number; message: string; clientId?: string }
 
 export type ConnectionStatus = "connecting" | "open" | "closed"
@@ -126,6 +128,7 @@ function parseEvent(raw: unknown): ServerEvent | null {
       json.type === "message" ||
       json.type === "receipt" ||
       json.type === "message_deleted" ||
+      json.type === "message_pinned" ||
       json.type === "error"
     ) {
       return json as ServerEvent

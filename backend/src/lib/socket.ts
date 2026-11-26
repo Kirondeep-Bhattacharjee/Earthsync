@@ -238,6 +238,45 @@ export async function announceDeletion(args: {
     }
 }
 
+// Tells both people a message was pinned or unpinned, on every tab they have
+// open. Each side sees the thread under the other person's username, and the
+// client simply refetches the pin list. Never throws: the change is saved.
+export async function announcePin(args: {
+    messageId: number;
+    pinned: boolean;
+    viewerId: number;
+    peerId: number;
+}): Promise<void> {
+    try {
+        const rows = await db
+            .select({ userId: profiles.userId, username: profiles.username })
+            .from(profiles)
+            .where(inArray(profiles.userId, [args.viewerId, args.peerId]));
+
+        const viewerName = rows.find((row) => row.userId === args.viewerId)?.username;
+        const peerName = rows.find((row) => row.userId === args.peerId)?.username;
+
+        if (!viewerName || !peerName) {
+            return;
+        }
+
+        pushToUser(args.viewerId, {
+            type: "message_pinned",
+            username: peerName,
+            id: args.messageId,
+            pinned: args.pinned,
+        });
+        pushToUser(args.peerId, {
+            type: "message_pinned",
+            username: viewerName,
+            id: args.messageId,
+            pinned: args.pinned,
+        });
+    } catch (error) {
+        console.error("Announce pin error:", error);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Authentication                                                      */
 /* ------------------------------------------------------------------ */

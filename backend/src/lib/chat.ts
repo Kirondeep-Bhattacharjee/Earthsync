@@ -5,6 +5,7 @@ import {
     conversations,
     friendships,
     media,
+    messagePins,
     messageDeletions,
     messages,
     profiles,
@@ -118,7 +119,7 @@ const UNREADABLE_TEXT = "This message can't be displayed";
 // How much of the original a reply quote carries.
 const REPLY_SNIPPET_LENGTH = 120;
 
-function snippet(text: string | null): string | null {
+export function snippet(text: string | null): string | null {
     if (text === null) {
         return null;
     }
@@ -694,6 +695,9 @@ export async function deleteMessage(
         .where(
             and(eq(messages.id, messageId), isNull(messages.deletedForEveryoneAt))
         );
+
+    // A deleted message can't stay pinned.
+    await db.delete(messagePins).where(eq(messagePins.messageId, messageId));
 
     return { peerId };
 }
