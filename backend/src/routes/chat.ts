@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { alias, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import { db } from "../db/index.js";
@@ -8,6 +9,7 @@ import {
     conversations,
     friendships,
     media,
+    messageDeletions,
     messages,
     profiles,
 } from "../db/schema.js";
@@ -16,10 +18,12 @@ import { handleError, validationError } from "../lib/http.js";
 import {
     buildChatMedia,
     chatMessageFromSent,
+    deleteMessage,
     findPeer,
     messageBodySchema,
     previewText,
     readMessageText,
+    replyPreviewFromRow,
     sendMessage,
     serializeMessage,
 } from "../lib/chat.js";
@@ -27,7 +31,7 @@ import { areFriends } from "../lib/relationships.js";
 
 import { usernameSchema } from "../lib/username.js";
 import { markRead, peerMarkers, receiptsMutual, statusSql } from "../lib/receipts.js";
-import { announceMessage, pushToUser } from "../lib/socket.js";
+import { announceDeletion, announceMessage, pushToUser } from "../lib/socket.js";
 
 const router = Router();
 
@@ -40,6 +44,8 @@ const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 const sendSchema = z.object({
     username: usernameSchema,
     body: messageBodySchema,
+    // The message this one replies to (same thread, checked in sendMessage).
+    replyToId: z.number().int().positive().optional(),
 });
 
 // box = which inbox tab: friends, or public (people you are not friends with).
@@ -55,12 +61,24 @@ const historyQuerySchema = z.object({
     limit: z.coerce.number().int().min(1).max(50).default(30),
 });
 
+const deleteMessageSchema = z.object({
+    id: z.coerce.number().int().positive(),
+    scope: z.enum(["me", "everyone"]),
+});
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
 function pictureUrl(key: string | null): string | null {
     return key && R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${key}` : null;
+}
+
+// True when I removed this message with "delete for me". Defaults to the
+// messages table's own id; pass another column (for example the id of an
+// aliased copy of messages) to check that one instead.
+function hiddenByMe(viewerId: number, messageId: AnyPgColumn = messages.id) {
+    return sql`exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messageId} and ${messageDeletions.userId} = ${viewerId})`;
 }
 
 // SQL pieces shared by the inbox and the unread count, so both always agree on
@@ -136,7 +154,12 @@ router.post("/messages", requireAuth, sendLimiter, async (req, res) => {
 
     try {
         const peerId = await findPeer(viewerId, parsed.data.username);
-        const sent = await sendMessage(viewerId, peerId, parsed.data.body);
+        const sent = await sendMessage(
+            viewerId,
+            peerId,
+            parsed.data.body,
+            parsed.data.replyToId
+        );
 
         // Deliver live to every open tab of both people (never throws).
         await announceMessage(sent);
@@ -208,7 +231,9 @@ router.get("/conversations", requireAuth, async (req, res) => {
         }
 
         // Last message of each thread, in one query. A thread that is visible to
-        // me has its last message newer than my hidden-before, so it is safe to show.
+        // me has its last message newer than my hidden-before, so it is safe to
+        // show. A message I deleted for myself is skipped, so the preview falls
+        // back to the one before it.
         const lastRows = await db
             .select({
                 id: messages.id,
@@ -219,6 +244,7 @@ router.get("/conversations", requireAuth, async (req, res) => {
                 bodyEnc: messages.bodyEnc,
                 keyVersion: messages.keyVersion,
                 createdAt: messages.createdAt,
+                deletedForEveryoneAt: messages.deletedForEveryoneAt,
             })
             .from(messages)
             .where(
@@ -228,9 +254,12 @@ router.get("/conversations", requireAuth, async (req, res) => {
                         .select({ id: sql<number>`max(${messages.id})` })
                         .from(messages)
                         .where(
-                            inArray(
-                                messages.conversationId,
-                                rows.map((row) => row.conversationId)
+                            and(
+                                inArray(
+                                    messages.conversationId,
+                                    rows.map((row) => row.conversationId)
+                                ),
+                                sql`not ${hiddenByMe(viewerId)}`
                             )
                         )
                         .groupBy(messages.conversationId)
@@ -256,7 +285,9 @@ router.get("/conversations", requireAuth, async (req, res) => {
                         ? {
                               kind: last.kind,
                               // Text, or "Photo" / "Voice message".
-                              body: previewText(last.kind, readMessageText(last)),
+                              body: last.deletedForEveryoneAt
+                                  ? "This message was deleted"
+                                  : previewText(last.kind, readMessageText(last)),
                               fromMe: last.senderId === viewerId,
                               createdAt: last.createdAt,
                           }
@@ -308,7 +339,10 @@ router.get("/conversations/unread-count", requireAuth, async (req, res) => {
 // `isFriend` tells the client whether photos and voice notes can be sent here.
 // Signed media URLs are made only at the end, after findPeer proved I'm in
 // this thread and not blocked, and only for rows the query let through (so
-// nothing I deleted for myself is signed).
+// nothing I deleted for myself, and nothing deleted for everyone, is signed).
+//
+// A reply carries a short quote of its original. The original is joined here
+// (as `reply_original`), so a page of history is still one query.
 router.get(
     "/conversations/:username/messages",
     requireAuth,
@@ -342,6 +376,9 @@ router.get(
 
             const { before, limit } = parsed.data;
 
+            // The message each reply points at.
+            const original = alias(messages, "reply_original");
+
             // Fetch one extra row to know whether an older page exists.
             const rows = await db
                 .select({
@@ -353,12 +390,23 @@ router.get(
                     bodyEnc: messages.bodyEnc,
                     keyVersion: messages.keyVersion,
                     createdAt: messages.createdAt,
+                    deletedForEveryoneAt: messages.deletedForEveryoneAt,
                     mediaKey: media.key,
                     mediaThumbKey: media.thumbKey,
                     mediaWidth: media.width,
                     mediaHeight: media.height,
                     mediaDuration: media.durationSeconds,
                     status: statusSql(mutual, peer.delivered, peer.read),
+                    replyId: original.id,
+                    replyConversationId: original.conversationId,
+                    replySenderId: original.senderId,
+                    replyKind: original.kind,
+                    replyBody: original.body,
+                    replyBodyEnc: original.bodyEnc,
+                    replyKeyVersion: original.keyVersion,
+                    replyCreatedAt: original.createdAt,
+                    replyDeletedAt: original.deletedForEveryoneAt,
+                    replyHidden: sql<boolean>`${hiddenByMe(viewerId, original.id)}`,
                 })
                 .from(messages)
                 .innerJoin(
@@ -366,6 +414,7 @@ router.get(
                     eq(conversations.id, messages.conversationId)
                 )
                 .leftJoin(media, eq(media.id, messages.mediaId))
+                .leftJoin(original, eq(original.id, messages.replyToId))
                 .where(
                     and(
                         eq(conversations.userLowId, low),
@@ -374,7 +423,9 @@ router.get(
                         or(
                             isNull(myHiddenBefore),
                             gt(messages.createdAt, myHiddenBefore)
-                        )
+                        ),
+                        // Messages I deleted just for myself.
+                        sql`not ${hiddenByMe(viewerId)}`
                     )
                 )
                 .orderBy(desc(messages.id))
@@ -385,12 +436,43 @@ router.get(
 
             const isFriend = await areFriends(viewerId, peerId);
 
+            // The quote above a reply, or null for a normal message. The joined
+            // columns are all null when there is no original.
+            function quoteOf(row: (typeof rows)[number]) {
+                if (
+                    row.replyId === null ||
+                    row.replyConversationId === null ||
+                    row.replySenderId === null ||
+                    row.replyKind === null ||
+                    row.replyCreatedAt === null
+                ) {
+                    return null;
+                }
+
+                return replyPreviewFromRow(
+                    {
+                        id: row.replyId,
+                        conversationId: row.replyConversationId,
+                        senderId: row.replySenderId,
+                        kind: row.replyKind,
+                        body: row.replyBody,
+                        bodyEnc: row.replyBodyEnc,
+                        keyVersion: row.replyKeyVersion,
+                        createdAt: row.replyCreatedAt,
+                        deletedForEveryoneAt: row.replyDeletedAt,
+                    },
+                    row.replyHidden,
+                    viewerId
+                );
+            }
+
             const chatMessages = await Promise.all(
                 page.reverse().map(async (row) =>
                     serializeMessage(
                         row,
                         viewerId,
-                        row.mediaKey
+                        // No signed URL for a message deleted for everyone.
+                        row.mediaKey && !row.deletedForEveryoneAt
                             ? await buildChatMedia({
                                   key: row.mediaKey,
                                   thumbKey: row.mediaThumbKey,
@@ -399,7 +481,8 @@ router.get(
                                   durationSeconds: row.mediaDuration,
                               })
                             : null,
-                        row.status
+                        row.status,
+                        quoteOf(row)
                     )
                 )
             );
@@ -428,7 +511,7 @@ router.post("/conversations/:username/read", requireAuth, async (req, res) => {
         return res.status(401).json({ message: "Not authenticated" });
     }
 
-        try {
+    try {
         const peerId = await findPeer(viewerId, req.params.username);
 
         // Moves my read marker (and delivered) and returns the receipt events
@@ -447,7 +530,51 @@ router.post("/conversations/:username/read", requireAuth, async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Delete for me                                                       */
+/* Delete one message                                                  */
+/* ------------------------------------------------------------------ */
+
+// DELETE /api/messages/:id?scope=me|everyone
+//   me:       hides it for me only (any message in a thread I'm in)
+//   everyone: sender only, within 48 hours; both people see a placeholder
+// Open tabs are told live (message_deleted).
+router.delete("/messages/:id", requireAuth, async (req, res) => {
+    const viewerId = req.session.userId;
+
+    if (viewerId === undefined) {
+        return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    const parsed = deleteMessageSchema.safeParse({
+        id: req.params.id,
+        scope: req.query.scope,
+    });
+
+    if (!parsed.success) {
+        return validationError(res, parsed.error);
+    }
+
+    try {
+        const { peerId } = await deleteMessage(
+            viewerId,
+            parsed.data.id,
+            parsed.data.scope
+        );
+
+        await announceDeletion({
+            messageId: parsed.data.id,
+            scope: parsed.data.scope,
+            viewerId,
+            peerId,
+        });
+
+        return res.json({ message: "Message deleted" });
+    } catch (error) {
+        return handleError(res, error, "Delete message");
+    }
+});
+
+/* ------------------------------------------------------------------ */
+/* Delete chat (for me)                                                */
 /* ------------------------------------------------------------------ */
 
 // Deleting a chat hides it for me only: my hidden-before moves to now(), no

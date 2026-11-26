@@ -314,6 +314,12 @@ export const messages = pgTable(
         mediaId: uuid("media_id")
             .unique()
             .references(() => media.id),
+                // The message this one replies to. Must be in the same thread
+        // (checked in sendMessage / sendAttachment).
+        replyToId: bigint("reply_to_id", { mode: "number" }).references(
+            (): AnyPgColumn => messages.id,
+            { onDelete: "set null" }
+        ),
         // NEW: set when the sender deletes for everyone. Clients get a
         // placeholder and no content. The content stays for 30 days, then a
         // purge job nulls body/body_enc/media_id; the row stays so the
@@ -490,5 +496,44 @@ export const messageDeletions = pgTable(
     (t) => [
         primaryKey({ columns: [t.messageId, t.userId] }),
         index("message_deletions_user_idx").on(t.userId),
+    ]
+)
+
+// Pinned messages: shared by both people in the chat. A message belongs to
+// one conversation, so it can only be pinned once.
+export const messagePins = pgTable(
+    "message_pins",
+    {
+        messageId: bigint("message_id", { mode: "number" })
+            .primaryKey()
+            .references(() => messages.id, { onDelete: "cascade" }),
+        conversationId: integer("conversation_id")
+            .notNull()
+            .references(() => conversations.id, { onDelete: "cascade" }),
+        pinnedBy: integer("pinned_by")
+            .notNull()
+            .references(() => users.id, { onDelete: "cascade" }),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+    },
+    (t) => [
+        index("message_pins_conversation_idx").on(t.conversationId, t.createdAt.desc()),
+    ]
+)
+
+// Starred (favorite) messages: private to the person who starred them.
+export const messageStars = pgTable(
+    "message_stars",
+    {
+        messageId: bigint("message_id", { mode: "number" })
+            .notNull()
+            .references(() => messages.id, { onDelete: "cascade" }),
+        userId: integer("user_id")
+            .notNull()
+            .references(() => users.id, { onDelete: "cascade" }),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+    },
+    (t) => [
+        primaryKey({ columns: [t.messageId, t.userId] }),
+        index("message_stars_user_idx").on(t.userId, t.createdAt.desc()),
     ]
 )

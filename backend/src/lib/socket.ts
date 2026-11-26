@@ -58,6 +58,10 @@ function allowedOrigin(): string {
 //   { type: "message", username, chatMessage }         a message in the thread with `username`,
 //                                                      sent to ALL of the sender's and recipient's sockets;
 //                                                      chatMessage = { id, body, createdAt, fromMe }
+//   { type: "receipt", username, status, upToId }      my messages up to upToId were delivered / read
+//   { type: "message_deleted", username, id, scope }   a message in the thread with `username` was deleted;
+//                                                      scope "me" goes only to the person who hid it,
+//                                                      "everyone" goes to both
 //   { type: "error", status, message, clientId? }      something was rejected
 //
 // Clients dedupe by chatMessage.id (the sender's own socket gets ack and message).
@@ -66,6 +70,7 @@ const clientEventSchema = z.object({
     clientId: z.string().max(64).optional(),
     username: usernameSchema,
     body: messageBodySchema,
+    replyToId: z.number().int().positive().optional(),
 });
 
 /* ------------------------------------------------------------------ */
@@ -191,6 +196,48 @@ export async function announceMessage(sent: SentMessage): Promise<void> {
     }
 }
 
+// Tells people a message was deleted. "me" goes only to the person who hid it
+// (all their tabs); "everyone" goes to both. Each side sees the thread under
+// the other person's username. Never throws: the delete is already saved.
+export async function announceDeletion(args: {
+    messageId: number;
+    scope: "me" | "everyone";
+    viewerId: number;
+    peerId: number;
+}): Promise<void> {
+    try {
+        const rows = await db
+            .select({ userId: profiles.userId, username: profiles.username })
+            .from(profiles)
+            .where(inArray(profiles.userId, [args.viewerId, args.peerId]));
+
+        const viewerName = rows.find((row) => row.userId === args.viewerId)?.username;
+        const peerName = rows.find((row) => row.userId === args.peerId)?.username;
+
+        if (!viewerName || !peerName) {
+            return;
+        }
+
+        pushToUser(args.viewerId, {
+            type: "message_deleted",
+            username: peerName,
+            id: args.messageId,
+            scope: args.scope,
+        });
+
+        if (args.scope === "everyone") {
+            pushToUser(args.peerId, {
+                type: "message_deleted",
+                username: viewerName,
+                id: args.messageId,
+                scope: "everyone",
+            });
+        }
+    } catch (error) {
+        console.error("Announce deletion error:", error);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Authentication                                                      */
 /* ------------------------------------------------------------------ */
@@ -302,7 +349,12 @@ async function handleMessage(socket: ChatSocket, data: RawData, isBinary: boolea
 
     try {
         const peerId = await findPeer(socket.userId, parsed.data.username);
-        const sent = await sendMessage(socket.userId, peerId, parsed.data.body);
+        const sent = await sendMessage(
+            socket.userId,
+            peerId,
+            parsed.data.body,
+            parsed.data.replyToId
+        );
 
         // Ack first so the sender's optimistic message gets its id before the
         // "message" event for the same id arrives.
@@ -374,13 +426,13 @@ export function attachChatSocket(server: Server) {
 
         sendJson(socket, { type: "ready" });
         // Whatever arrived while this user was offline counts as delivered now.
-markDeliveredOnConnect(socket.userId)
-    .then((pushes) => {
-        for (const push of pushes) {
-            pushToUser(push.toUserId, push.event);
-        }
-    })
-    .catch((error) => console.error("Mark delivered error:", error));
+        markDeliveredOnConnect(socket.userId)
+            .then((pushes) => {
+                for (const push of pushes) {
+                    pushToUser(push.toUserId, push.event);
+                }
+            })
+            .catch((error) => console.error("Mark delivered error:", error));
     }
 
     async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer) {

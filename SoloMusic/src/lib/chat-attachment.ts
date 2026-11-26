@@ -50,6 +50,8 @@ type UploadOptions = {
   kind: AttachmentKind
   file: Blob
   fileName: string
+  // The message this photo or voice note replies to.
+  replyToId?: number | null
   // 0 to 1, how much of the file has left the browser.
   onProgress?: (fraction: number) => void
   signal?: AbortSignal
@@ -58,7 +60,7 @@ type UploadOptions = {
 // POST /api/messages/attachment. XMLHttpRequest, not fetch, because fetch has
 // no upload progress. Resolves with the saved message (same shape as history).
 export function uploadAttachment(options: UploadOptions): Promise<ChatMessage> {
-  const { username, kind, file, fileName, onProgress, signal } = options
+  const { username, kind, file, fileName, replyToId, onProgress, signal } = options
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
@@ -67,6 +69,10 @@ export function uploadAttachment(options: UploadOptions): Promise<ChatMessage> {
     form.append("username", username)
     form.append("kind", kind)
     form.append("file", file, fileName)
+
+    if (replyToId) {
+      form.append("replyToId", String(replyToId))
+    }
 
     xhr.open("POST", `${API_URL}/api/messages/attachment`)
     xhr.withCredentials = true

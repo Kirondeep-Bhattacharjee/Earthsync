@@ -26,6 +26,14 @@ export type ChatMedia = {
 // Delivery state of one of MY messages. It only ever moves forward.
 export type ReceiptStatus = "sent" | "delivered" | "read"
 
+export type ReplyPreview = {
+  id: number
+  fromMe: boolean
+  kind: "text" | "image" | "voice"
+  body: string | null // short snippet of a text message
+  unavailable: boolean
+}
+
 export type ChatMessage = {
   id: number
   kind: "text" | "image" | "voice"
@@ -35,6 +43,7 @@ export type ChatMessage = {
   fromMe: boolean
   status: ReceiptStatus | null // only for my own messages
   deleted: boolean // deleted for everyone: body and media are null
+  replyTo: ReplyPreview | null
 }
 
 export type ServerEvent =
@@ -70,7 +79,12 @@ type ChatSocketValue = {
   reconnectCount: number
   // Returns false when the socket is not ready, so the caller can mark the
   // message as failed instead of waiting for an ack that will never come.
-  send: (username: string, body: string, clientId: string) => boolean
+  send: (
+    username: string,
+    body: string,
+    clientId: string,
+    replyToId?: number
+  ) => boolean
   // Returns the unsubscribe function.
   subscribe: (listener: Listener) => () => void
 }
@@ -345,15 +359,17 @@ export function ChatSocketProvider() {
     }
   }, [userId])
 
-  const send = React.useCallback(
-    (username: string, body: string, clientId: string) => {
+    const send = React.useCallback(
+    (username: string, body: string, clientId: string, replyToId?: number) => {
       const ws = socketRef.current
 
       if (!ws || !readyRef.current || ws.readyState !== WebSocket.OPEN) {
         return false
       }
 
-      ws.send(JSON.stringify({ type: "send", clientId, username, body }))
+      ws.send(
+        JSON.stringify({ type: "send", clientId, username, body, replyToId })
+      )
       return true
     },
     []

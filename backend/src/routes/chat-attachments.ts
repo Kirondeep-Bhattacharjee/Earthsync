@@ -27,6 +27,8 @@ const router = Router();
 const attachmentSchema = z.object({
     username: usernameSchema,
     kind: z.enum(["image", "voice"]),
+    // Optional: the message this photo or voice note replies to.
+    replyToId: z.coerce.number().int().positive().optional(),
 });
 
 // Written to disk, like posts. The processors enforce the exact limits
@@ -114,11 +116,12 @@ router.post(
                     : Promise.resolve(),
             ]);
 
-            const sent = await sendAttachment(viewerId, peerId, {
-                key,
-                thumbKey,
-                processed,
-            });
+            const sent = await sendAttachment(
+                viewerId,
+                peerId,
+                { key, thumbKey, processed },
+                parsed.data.replyToId
+            );
 
             // Saved: the files belong to the message now.
             uploadedKeys = [];

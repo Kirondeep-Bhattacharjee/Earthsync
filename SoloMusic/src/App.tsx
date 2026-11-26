@@ -20,6 +20,7 @@ const UserProfile = lazy(() => import("./Pages/user-profile"))
 const Connect = lazy(() => import("@/Pages/connect"))
 const Chats = lazy(() => import("./Pages/chats"))
 const ChatThread = lazy(() => import("./Pages/chat-thread"))
+const Settings = lazy(() => import("./Pages/settings"))
 
    
 
@@ -66,6 +67,7 @@ export function App() {
                     <Route path="/requests" element={<Requests />} />
                     <Route path="/chats" element={<Chats />} />
                     <Route path="/chats/:username" element={<ChatThread />} />
+                    <Route path="/settings" element={<Settings />} />
                     
                     {/* every future protected page goes here */}
                   </Route>

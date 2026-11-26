@@ -1,10 +1,11 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import {
     conversations,
     friendships,
     media,
+    messageDeletions,
     messages,
     profiles,
 } from "../db/schema.js";
@@ -48,6 +49,18 @@ export type ChatMedia = {
     durationSeconds: number | null;
 };
 
+// The quote shown above a reply, as one viewer sees it. `body` is a short text
+// snippet (text messages only); photos and voice notes are labelled by `kind`.
+// `unavailable` = the original was deleted (for everyone, or by this viewer for
+// themselves): no content is sent, only the fact that it is gone.
+export type ReplyPreview = {
+    id: number;
+    fromMe: boolean;
+    kind: MessageKind;
+    body: string | null;
+    unavailable: boolean;
+};
+
 // What the API and the WebSocket send to a client. One shape for history, the
 // REST send response and live pushes, built only by the helpers below.
 export type ChatMessage = {
@@ -58,6 +71,17 @@ export type ChatMessage = {
     createdAt: Date;
     fromMe: boolean;
     status: ReceiptStatus | null; // only for my own messages
+    deleted: boolean; // deleted for everyone: body and media are null
+    replyTo: ReplyPreview | null;
+};
+
+// The message a new message replies to, as found when sending. senderId lets
+// each side work out "you" vs "them" in the quote.
+export type ReplyTarget = {
+    id: number;
+    senderId: number;
+    kind: MessageKind;
+    body: string | null; // short snippet of a text message, otherwise null
 };
 
 export type SentMessage = {
@@ -69,6 +93,7 @@ export type SentMessage = {
     body: string | null; // plaintext, in memory only; the database holds ciphertext
     media: ChatMedia | null;
     createdAt: Date;
+    replyTo: ReplyTarget | null;
 };
 
 // A messages row as it is stored.
@@ -81,6 +106,7 @@ export type StoredMessage = {
     bodyEnc: string | null;
     keyVersion: number | null;
     createdAt: Date;
+    deletedForEveryoneAt?: Date | null;
 };
 
 /* ------------------------------------------------------------------ */
@@ -88,6 +114,21 @@ export type StoredMessage = {
 /* ------------------------------------------------------------------ */
 
 const UNREADABLE_TEXT = "This message can't be displayed";
+
+// How much of the original a reply quote carries.
+const REPLY_SNIPPET_LENGTH = 120;
+
+function snippet(text: string | null): string | null {
+    if (text === null) {
+        return null;
+    }
+
+    const flat = text.replace(/\s+/g, " ").trim();
+
+    return flat.length > REPLY_SNIPPET_LENGTH
+        ? `${flat.slice(0, REPLY_SNIPPET_LENGTH - 1)}…`
+        : flat;
+}
 
 // The text of a stored message. Encrypted rows are decrypted; rows from before
 // encryption still have plaintext in `body`. A row that cannot be decrypted
@@ -114,6 +155,37 @@ export function readMessageText(row: StoredMessage): string | null {
     }
 }
 
+// The quote for a reply in history, built from the original's stored row.
+// `original` is null when the row is gone. `hiddenForViewer` = the viewer
+// deleted the original for themselves.
+export function replyPreviewFromRow(
+    original: StoredMessage | null,
+    hiddenForViewer: boolean,
+    viewerId: number
+): ReplyPreview | null {
+    if (!original) {
+        return null;
+    }
+
+    if (original.deletedForEveryoneAt != null || hiddenForViewer) {
+        return {
+            id: original.id,
+            fromMe: original.senderId === viewerId,
+            kind: original.kind,
+            body: null,
+            unavailable: true,
+        };
+    }
+
+    return {
+        id: original.id,
+        fromMe: original.senderId === viewerId,
+        kind: original.kind,
+        body: original.kind === "text" ? snippet(readMessageText(original)) : null,
+        unavailable: false,
+    };
+}
+
 // A stored message as one viewer should see it. Every read path uses this, so
 // anything that has to change per viewer (for example masking a blocked
 // person) changes in one place.
@@ -121,18 +193,24 @@ export function serializeMessage(
     row: StoredMessage,
     viewerId: number,
     media: ChatMedia | null = null,
-    status: ReceiptStatus = "sent"
+    status: ReceiptStatus = "sent",
+    replyTo: ReplyPreview | null = null
 ): ChatMessage {
     const fromMe = row.senderId === viewerId;
+    // Deleted for everyone: the row stays in the database for now, but no
+    // content ever leaves the server.
+    const deleted = row.deletedForEveryoneAt != null;
 
     return {
         id: row.id,
         kind: row.kind,
-        body: row.kind === "text" ? readMessageText(row) : null,
-        media,
+        body: !deleted && row.kind === "text" ? readMessageText(row) : null,
+        media: deleted ? null : media,
         createdAt: row.createdAt,
         fromMe,
         status: fromMe ? status : null,
+        deleted,
+        replyTo: deleted ? null : replyTo,
     };
 }
 
@@ -141,6 +219,8 @@ export function chatMessageFromSent(
     sent: SentMessage,
     fromMe: boolean
 ): ChatMessage {
+    const viewerId = fromMe ? sent.senderId : sent.recipientId;
+
     return {
         id: sent.id,
         kind: sent.kind,
@@ -149,6 +229,16 @@ export function chatMessageFromSent(
         createdAt: sent.createdAt,
         fromMe,
         status: fromMe ? "sent" : null,
+        deleted: false,
+        replyTo: sent.replyTo
+            ? {
+                  id: sent.replyTo.id,
+                  fromMe: sent.replyTo.senderId === viewerId,
+                  kind: sent.replyTo.kind,
+                  body: sent.replyTo.body,
+                  unavailable: false,
+              }
+            : null,
     };
 }
 
@@ -195,6 +285,68 @@ export async function findPeer(
     return peer.id;
 }
 
+// The original of a reply. It must be in THIS thread, still exist, and be
+// visible to the sender: not deleted for everyone, not deleted by the sender
+// for themselves, and not hidden by the sender deleting the chat. Anything else
+// is the same 404, so a client can't probe other people's messages by id.
+// No replyToId = a normal message (null).
+async function findReplyTarget(
+    senderId: number,
+    recipientId: number,
+    replyToId: number | undefined
+): Promise<ReplyTarget | null> {
+    if (replyToId === undefined) {
+        return null;
+    }
+
+    const low = Math.min(senderId, recipientId);
+    const high = Math.max(senderId, recipientId);
+
+    const senderHiddenBefore =
+        senderId === low
+            ? conversations.lowHiddenBefore
+            : conversations.highHiddenBefore;
+
+    const [row] = await db
+        .select({
+            id: messages.id,
+            conversationId: messages.conversationId,
+            senderId: messages.senderId,
+            kind: messages.kind,
+            body: messages.body,
+            bodyEnc: messages.bodyEnc,
+            keyVersion: messages.keyVersion,
+            createdAt: messages.createdAt,
+            deletedAt: messages.deletedForEveryoneAt,
+            hidden: sql<boolean>`exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messages.id} and ${messageDeletions.userId} = ${senderId})`,
+        })
+        .from(messages)
+        .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+        .where(
+            and(
+                eq(messages.id, replyToId),
+                eq(conversations.userLowId, low),
+                eq(conversations.userHighId, high),
+                or(
+                    isNull(senderHiddenBefore),
+                    gt(messages.createdAt, senderHiddenBefore)
+                )
+            )
+        )
+        .limit(1);
+
+    if (!row || row.deletedAt !== null || row.hidden) {
+        throw new HttpError(404, "The message you are replying to is not available");
+    }
+
+    return {
+        id: row.id,
+        senderId: row.senderId,
+        kind: row.kind,
+        body: row.kind === "text" ? snippet(readMessageText(row)) : null,
+    };
+}
+
 /* ------------------------------------------------------------------ */
 /* Sending                                                             */
 /* ------------------------------------------------------------------ */
@@ -206,13 +358,15 @@ export async function findPeer(
 //     checked here (photos and voice notes are friends only, see below)
 //   - the thread is created on the first message, and last_message_at moves in
 //     the same transaction so the inbox can sort without scanning messages
+//   - a reply (replyToId) must point at a live message in this same thread
 //
 // The block check is repeated here even though findPeer() does it, because the
 // WebSocket path will pass ids, not usernames.
 export async function sendMessage(
     senderId: number,
     recipientId: number,
-    rawBody: unknown
+    rawBody: unknown,
+    replyToId?: number
 ): Promise<SentMessage> {
     const body = messageBodySchema.safeParse(rawBody);
 
@@ -230,6 +384,8 @@ export async function sendMessage(
     if (await isBlockedEitherWay(senderId, recipientId)) {
         throw new HttpError(404, "User not found");
     }
+
+    const replyTo = await findReplyTarget(senderId, recipientId, replyToId);
 
     // Conversations store the smaller id first (check constraint).
     const low = Math.min(senderId, recipientId);
@@ -268,6 +424,7 @@ export async function sendMessage(
                 kind: "text",
                 bodyEnc,
                 keyVersion,
+                replyToId: replyTo?.id,
             })
             .returning({ id: messages.id, createdAt: messages.createdAt });
 
@@ -284,6 +441,7 @@ export async function sendMessage(
             body: body.data,
             media: null,
             createdAt: message.createdAt,
+            replyTo,
         };
     });
 }
@@ -337,7 +495,8 @@ export async function assertCanSendAttachment(
 }
 
 // Saves an image or voice message whose files are already in R2. The caller
-// deletes the files if this throws.
+// deletes the files if this throws (including a reply to a message that is no
+// longer available).
 export async function sendAttachment(
     senderId: number,
     recipientId: number,
@@ -345,7 +504,8 @@ export async function sendAttachment(
         key: string;
         thumbKey: string | null;
         processed: ProcessedChatMedia;
-    }
+    },
+    replyToId?: number
 ): Promise<SentMessage> {
     const { key, thumbKey, processed } = upload;
 
@@ -356,6 +516,8 @@ export async function sendAttachment(
     if (await isBlockedEitherWay(senderId, recipientId)) {
         throw new HttpError(404, "User not found");
     }
+
+    const replyTo = await findReplyTarget(senderId, recipientId, replyToId);
 
     const low = Math.min(senderId, recipientId);
     const high = Math.max(senderId, recipientId);
@@ -422,6 +584,7 @@ export async function sendAttachment(
                 senderId,
                 kind,
                 mediaId: mediaRow.id,
+                replyToId: replyTo?.id,
             })
             .returning({ id: messages.id, createdAt: messages.createdAt });
 
@@ -451,5 +614,86 @@ export async function sendAttachment(
             durationSeconds: processed.durationSeconds,
         }),
         createdAt: saved.createdAt,
+        replyTo,
     };
+}
+
+/* ------------------------------------------------------------------ */
+/* Deleting a message                                                  */
+/* ------------------------------------------------------------------ */
+
+export type DeleteScope = "me" | "everyone";
+
+// How long "delete for everyone" stays available. Enforced here, in SQL; the
+// frontend only decides whether to show the option.
+export const DELETE_FOR_EVERYONE_HOURS = 48;
+
+// "me": hides the message for the viewer only (any message in a thread they are
+// in). "everyone": the sender only, within 48 hours; both people get a
+// placeholder. Returns the other person so the caller can push live events.
+// Unknown message, not in the thread, and blocked all give the same 404.
+export async function deleteMessage(
+    viewerId: number,
+    messageId: number,
+    scope: DeleteScope
+): Promise<{ peerId: number }> {
+    const [row] = await db
+        .select({
+            senderId: messages.senderId,
+            deletedAt: messages.deletedForEveryoneAt,
+            userLowId: conversations.userLowId,
+            userHighId: conversations.userHighId,
+            // Compared in SQL so clocks can't disagree.
+            inWindow: sql<boolean>`${messages.createdAt} > now() - ${sql.raw(
+                `interval '${DELETE_FOR_EVERYONE_HOURS} hours'`
+            )}`,
+        })
+        .from(messages)
+        .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+        .where(eq(messages.id, messageId))
+        .limit(1);
+
+    if (!row || (row.userLowId !== viewerId && row.userHighId !== viewerId)) {
+        throw new HttpError(404, "Message not found");
+    }
+
+    const peerId = row.userLowId === viewerId ? row.userHighId : row.userLowId;
+
+    if (await isBlockedEitherWay(viewerId, peerId)) {
+        throw new HttpError(404, "Message not found");
+    }
+
+    if (scope === "me") {
+        // Idempotent: hiding twice is fine.
+        await db
+            .insert(messageDeletions)
+            .values({ messageId, userId: viewerId })
+            .onConflictDoNothing();
+
+        return { peerId };
+    }
+
+    if (row.senderId !== viewerId) {
+        throw new HttpError(
+            403,
+            "You can only delete your own messages for everyone"
+        );
+    }
+
+    if (!row.inWindow) {
+        throw new HttpError(
+            403,
+            `You can only delete a message for everyone within ${DELETE_FOR_EVERYONE_HOURS} hours of sending`
+        );
+    }
+
+    // Already deleted: nothing to do (idempotent).
+    await db
+        .update(messages)
+        .set({ deletedForEveryoneAt: sql`now()` })
+        .where(
+            and(eq(messages.id, messageId), isNull(messages.deletedForEveryoneAt))
+        );
+
+    return { peerId };
 }

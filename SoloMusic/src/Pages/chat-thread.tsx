@@ -2,6 +2,7 @@ import * as React from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   IconAlertCircle,
+  IconArrowBackUp,
   IconArrowLeft,
   IconBan,
   IconCheck,
@@ -14,6 +15,7 @@ import {
   IconPhoto,
   IconSend,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react"
 import {
   AlertDialog,
@@ -74,6 +76,7 @@ import {
   type ChatMedia,
   type ChatMessage,
   type ReceiptStatus,
+  type ReplyPreview,
   type ServerEvent,
 } from "@/lib/chat-socket"
 import { formatDayLabel, isSameDay } from "@/lib/format-time"
@@ -98,6 +101,13 @@ const MEDIA_ERROR_REFRESH_GAP_MS = 30_000
 // "Delete for everyone" is only offered this long after sending (the server
 // enforces the same limit; this only decides whether the option is shown).
 const DELETE_FOR_EVERYONE_MS = 48 * 60 * 60 * 1000
+// Tapping a quote loads older pages until the original is found, but gives up
+// after this many pages (30 messages each) instead of loading a whole history.
+const MAX_JUMP_PAGES = 20
+// How long the original stays highlighted after a jump.
+const HIGHLIGHT_MS = 1500
+// How much of the original a reply quote shows (the server cuts it the same).
+const REPLY_SNIPPET_LENGTH = 120
 
 /* ------------------------------------------------------------------ */
 /* Types and helpers                                                   */
@@ -128,6 +138,8 @@ type Item = {
   receipt: ReceiptStatus | null
   // Deleted for everyone: no body, no media, shown as a placeholder.
   deleted: boolean
+  // The message this one replies to (a short quote), or null.
+  replyTo: ReplyPreview | null
   error: string | null
 }
 
@@ -177,6 +189,58 @@ function formatDuration(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds))
 
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`
+}
+
+// Waits for React to draw what was just set, so the DOM can be searched.
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
+function snippet(text: string | null): string | null {
+  if (text === null) {
+    return null
+  }
+
+  const flat = text.replace(/\s+/g, " ").trim()
+
+  return flat.length > REPLY_SNIPPET_LENGTH
+    ? `${flat.slice(0, REPLY_SNIPPET_LENGTH - 1)}…`
+    : flat
+}
+
+// The quote for replying to this bubble. Only a saved, not-deleted message can
+// be replied to.
+function quoteFromItem(item: Item): ReplyPreview | null {
+  if (item.id === null || item.deleted) {
+    return null
+  }
+
+  return {
+    id: item.id,
+    fromMe: item.fromMe,
+    kind: item.kind,
+    body: item.kind === "text" ? snippet(item.body) : null,
+    unavailable: false,
+  }
+}
+
+// One line of text for a quote (in a bubble or above the composer).
+function quoteText(reply: ReplyPreview): string {
+  if (reply.unavailable) {
+    return "Message unavailable"
+  }
+
+  if (reply.kind === "image") {
+    return "Photo"
+  }
+
+  if (reply.kind === "voice") {
+    return "Voice message"
+  }
+
+  return reply.body ?? ""
 }
 
 const RECEIPT_RANK: Record<ReceiptStatus, number> = {
@@ -231,6 +295,7 @@ function fromServer(message: ChatMessage): Item {
     status: "sent",
     receipt: message.status,
     deleted: message.deleted,
+    replyTo: message.replyTo ?? null,
     error: null,
   }
 }
@@ -273,6 +338,7 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
             receipt: maxReceipt(existing.receipt, message.status),
             // A deleted message never comes back.
             deleted: existing.deleted || message.deleted,
+            replyTo: existing.deleted ? null : (message.replyTo ?? null),
             error: null,
           }
         : fromServer(message)
@@ -304,14 +370,25 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
 }
 
 // Delete for me removes the bubble; delete for everyone keeps it as a
-// "This message was deleted" placeholder.
+// "This message was deleted" placeholder. Either way, any reply that quotes it
+// now shows "Message unavailable" (the server does the same on a refetch).
 function applyDeletion(items: Item[], id: number, scope: DeleteScope): Item[] {
-  if (scope === "me") {
-    return items.filter((item) => item.id !== id)
-  }
+  const next =
+    scope === "me"
+      ? items.filter((item) => item.id !== id)
+      : items.map((item) =>
+          item.id === id
+            ? { ...item, deleted: true, body: null, media: null, replyTo: null }
+            : item
+        )
 
-  return items.map((item) =>
-    item.id === id ? { ...item, deleted: true, body: null, media: null } : item
+  return next.map((item) =>
+    item.replyTo && item.replyTo.id === id && !item.replyTo.unavailable
+      ? {
+          ...item,
+          replyTo: { ...item.replyTo, body: null, unavailable: true },
+        }
+      : item
   )
 }
 
@@ -357,10 +434,13 @@ function ReceiptTicks({ status }: { status: ReceiptStatus }) {
 // device, always visible on touch screens.
 function MessageMenu({
   align,
+  onReply,
   onDeleteForMe,
   onDeleteForEveryone,
 }: {
   align: "start" | "end"
+  // Null for a message that can't be replied to (a deleted one).
+  onReply: (() => void) | null
   onDeleteForMe: () => void
   onDeleteForEveryone: (() => void) | null
 }) {
@@ -379,6 +459,12 @@ function MessageMenu({
         <IconDotsVertical className="size-4" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align={align}>
+        {onReply && (
+          <DropdownMenuItem onClick={onReply}>
+            <IconArrowBackUp aria-hidden="true" />
+            Reply
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onClick={onDeleteForMe}>
           <IconTrash aria-hidden="true" />
           Delete for me
@@ -516,6 +602,11 @@ export default function ChatThread() {
   const [sendToken, setSendToken] = React.useState(0)
   const [floors, setFloors] = React.useState<Floors>({ delivered: 0, read: 0 })
 
+  // The message I am replying to (shown above the composer), and the message
+  // that is briefly highlighted after tapping a quote.
+  const [replyingTo, setReplyingTo] = React.useState<Item | null>(null)
+  const [highlightId, setHighlightId] = React.useState<number | null>(null)
+
   // The photo open in the full-screen viewer, and the message being deleted.
   const [viewer, setViewer] = React.useState<ChatMedia | null>(null)
   const [pendingDelete, setPendingDelete] = React.useState<{
@@ -535,10 +626,23 @@ export default function ChatThread() {
   const objectUrlsRef = React.useRef(new Set<string>())
   const fetchedAtRef = React.useRef(0)
   const mediaErrorAtRef = React.useRef(0)
+  // The quote to attach to the next photo or voice note, kept in a ref because
+  // the voice recorder calls back with an older copy of this page's state.
+  const replyQuoteRef = React.useRef<ReplyPreview | null>(null)
+  const cursorRef = React.useRef<number | null>(null)
+  const jumpingRef = React.useRef(false)
 
   const items = state.status === "ready" ? state.items : NO_ITEMS
   const nextCursor = state.status === "ready" ? state.nextCursor : null
   const isFriend = state.status === "ready" ? state.isFriend : false
+
+  React.useEffect(() => {
+    cursorRef.current = nextCursor
+  }, [nextCursor])
+
+  React.useEffect(() => {
+    replyQuoteRef.current = replyingTo ? quoteFromItem(replyingTo) : null
+  }, [replyingTo])
 
   /* ---------------------------- loading ---------------------------- */
 
@@ -654,6 +758,8 @@ export default function ChatThread() {
     setFloors({ delivered: 0, read: 0 })
     setViewer(null)
     setPendingDelete(null)
+    setReplyingTo(null)
+    setHighlightId(null)
 
     if (!username) {
       setState({ status: "not-found" })
@@ -772,6 +878,80 @@ export default function ChatThread() {
     }
   }
 
+  // Tapping a quote: scroll to the original and highlight it. If it is older
+  // than what is loaded, load older pages until it shows up (up to
+  // MAX_JUMP_PAGES), then scroll to it.
+  const jumpToMessage = React.useCallback(
+    async (id: number) => {
+      if (jumpingRef.current) {
+        return
+      }
+
+      jumpingRef.current = true
+
+      const requestedFor = username
+      const find = () =>
+        document.querySelector<HTMLElement>(`[data-message-id="${id}"]`)
+
+      try {
+        let element = find()
+        let cursor = cursorRef.current
+        let pages = 0
+
+        while (!element && cursor !== null && pages < MAX_JUMP_PAGES) {
+          const response = await fetch(
+            `${API_URL}/api/conversations/${encodeURIComponent(requestedFor)}/messages?limit=${PAGE_SIZE}&before=${cursor}`,
+            { credentials: "include" }
+          )
+
+          if (!response.ok) {
+            throw new Error(`Unexpected status ${response.status}`)
+          }
+
+          const data = (await response.json()) as MessagesResponse
+
+          if (nameRef.current !== requestedFor) {
+            return
+          }
+
+          setState((previous) =>
+            previous.status === "ready"
+              ? {
+                  status: "ready",
+                  items: mergePage(previous.items, data.messages),
+                  nextCursor: data.nextCursor,
+                  isFriend: previous.isFriend,
+                }
+              : previous
+          )
+
+          cursor = data.nextCursor
+          pages += 1
+
+          await nextPaint()
+          element = find()
+        }
+
+        if (!element) {
+          setComposerError("That message is no longer available.")
+          return
+        }
+
+        element.scrollIntoView({ block: "center", behavior: "smooth" })
+        setHighlightId(id)
+        window.setTimeout(
+          () => setHighlightId((current) => (current === id ? null : current)),
+          HIGHLIGHT_MS
+        )
+      } catch {
+        setComposerError("Could not load older messages. Try again.")
+      } finally {
+        jumpingRef.current = false
+      }
+    },
+    [username]
+  )
+
   /* ---------------------------- sending ---------------------------- */
 
   const patchItem = React.useCallback(
@@ -800,7 +980,7 @@ export default function ChatThread() {
   }, [])
 
   const sendBody = React.useCallback(
-    (body: string) => {
+    (body: string, replyTo: ReplyPreview | null) => {
       const clientId = newClientId()
 
       const item: Item = {
@@ -818,6 +998,7 @@ export default function ChatThread() {
         status: "sending",
         receipt: null,
         deleted: false,
+        replyTo,
         error: null,
       }
 
@@ -828,7 +1009,7 @@ export default function ChatThread() {
       )
       setSendToken((token) => token + 1)
 
-      if (!send(username, body, clientId)) {
+      if (!send(username, body, clientId, replyTo?.id)) {
         patchItem(clientId, {
           status: "failed",
           error: "Not connected. Check your connection and retry.",
@@ -857,8 +1038,11 @@ export default function ChatThread() {
       return
     }
 
+    const quote = replyingTo ? quoteFromItem(replyingTo) : null
+
     setDraft("")
-    sendBody(body)
+    setReplyingTo(null)
+    sendBody(body, quote)
   }
 
   function onComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -894,9 +1078,14 @@ export default function ChatThread() {
     removeItem(item)
 
     if (item.upload) {
-      void sendAttachment(item.upload.kind, item.upload.file, item.upload.fileName)
+      void sendAttachment(
+        item.upload.kind,
+        item.upload.file,
+        item.upload.fileName,
+        item.replyTo
+      )
     } else if (item.body !== null) {
-      sendBody(item.body)
+      sendBody(item.body, item.replyTo)
     }
   }
 
@@ -911,7 +1100,12 @@ export default function ChatThread() {
   // pending bubble is replaced by the saved message. The socket also pushes the
   // same message, and mergePage dedupes by id, so it never shows twice.
   const sendAttachment = React.useCallback(
-    async (kind: AttachmentKind, file: Blob, fileName: string) => {
+    async (
+      kind: AttachmentKind,
+      file: Blob,
+      fileName: string,
+      replyTo: ReplyPreview | null
+    ) => {
       const requestedFor = username
       const clientId = newClientId()
       const localUrl = kind === "image" ? URL.createObjectURL(file) : null
@@ -935,6 +1129,7 @@ export default function ChatThread() {
         status: "sending",
         receipt: null,
         deleted: false,
+        replyTo,
         error: null,
       }
 
@@ -955,6 +1150,7 @@ export default function ChatThread() {
           kind,
           file,
           fileName,
+          replyToId: replyTo?.id ?? null,
           onProgress: (fraction) => patchItem(clientId, { progress: fraction }),
         })
 
@@ -1033,6 +1229,8 @@ export default function ChatThread() {
       return
     }
 
+    // Taken now, before the (slow) resize, in case the reply changes meanwhile.
+    const quote = replyQuoteRef.current
     const prepared = await prepareImage(file)
 
     if (prepared.size > IMAGE_MAX_BYTES) {
@@ -1042,12 +1240,16 @@ export default function ChatThread() {
 
     const name = prepared.type === "image/webp" ? "photo.webp" : file.name
 
-    void sendAttachment("image", prepared, name)
+    setReplyingTo(null)
+    void sendAttachment("image", prepared, name, quote)
   }
 
   const onVoiceFinished = React.useCallback(
     (voice: RecordedVoice) => {
-      void sendAttachment("voice", voice.blob, voice.fileName)
+      const quote = replyQuoteRef.current
+
+      setReplyingTo(null)
+      void sendAttachment("voice", voice.blob, voice.fileName, quote)
     },
     [sendAttachment]
   )
@@ -1098,13 +1300,20 @@ export default function ChatThread() {
       // A message was deleted, here or in another tab, or by the other person.
       if (event.type === "message_deleted") {
         if (event.username === username) {
+          const deletedId = event.id
+
           setState((previous) =>
             previous.status === "ready"
               ? {
                   ...previous,
-                  items: applyDeletion(previous.items, event.id, event.scope),
+                  items: applyDeletion(previous.items, deletedId, event.scope),
                 }
               : previous
+          )
+
+          // Don't keep a reply open to a message that no longer exists.
+          setReplyingTo((current) =>
+            current && current.id === deletedId ? null : current
           )
         }
 
@@ -1238,6 +1447,9 @@ export default function ChatThread() {
         previous.status === "ready"
           ? { ...previous, items: applyDeletion(previous.items, id, scope) }
           : previous
+      )
+      setReplyingTo((current) =>
+        current && current.id === id ? null : current
       )
       setPendingDelete(null)
     } catch (error) {
@@ -1446,6 +1658,7 @@ export default function ChatThread() {
                 const menu = canMenu ? (
                   <MessageMenu
                     align={item.fromMe ? "end" : "start"}
+                    onReply={item.deleted ? null : () => setReplyingTo(item)}
                     onDeleteForMe={() => askDelete(item, "me")}
                     onDeleteForEveryone={
                       canDeleteForEveryone
@@ -1454,6 +1667,8 @@ export default function ChatThread() {
                     }
                   />
                 ) : null
+
+                const reply = item.deleted ? null : item.replyTo
 
                 return (
                   <React.Fragment key={item.key}>
@@ -1471,7 +1686,39 @@ export default function ChatThread() {
                     <MessageScrollerItem messageId={item.key}>
                       <Message align={align}>
                         <MessageContent>
+                          {/* The quote of the message this one replies to. Tap
+                              it to jump to the original. */}
+                          {reply && (
+                            <div
+                              className={cn(
+                                "flex",
+                                item.fromMe ? "justify-end" : "justify-start"
+                              )}
+                            >
+                              <button
+                                type="button"
+                                disabled={reply.unavailable}
+                                aria-label="Go to the original message"
+                                onClick={() => void jumpToMessage(reply.id)}
+                                className="mb-1 flex min-w-0 max-w-[80%] flex-col gap-0.5 border-l-2 border-primary bg-muted px-2 py-1 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring enabled:cursor-pointer enabled:hover:bg-muted/70"
+                              >
+                                <span className="font-medium">
+                                  {reply.fromMe ? "You" : `@${username}`}
+                                </span>
+                                <span
+                                  className={cn(
+                                    "truncate text-muted-foreground",
+                                    reply.unavailable && "italic"
+                                  )}
+                                >
+                                  {quoteText(reply)}
+                                </span>
+                              </button>
+                            </div>
+                          )}
+
                           <div
+                            data-message-id={item.id ?? undefined}
                             className={cn(
                               "group/msg flex items-center gap-1",
                               item.fromMe ? "justify-end" : "justify-start"
@@ -1494,7 +1741,10 @@ export default function ChatThread() {
                               }
                               className={cn(
                                 item.deleted && "text-muted-foreground",
-                                item.status !== "sent" && "opacity-70"
+                                item.status !== "sent" && "opacity-70",
+                                item.id !== null &&
+                                  highlightId === item.id &&
+                                  "ring-2 ring-primary"
                               )}
                             >
                               {item.deleted ? (
@@ -1594,6 +1844,37 @@ export default function ChatThread() {
           <Alert variant="destructive" className="mb-2">
             <AlertDescription>{composerError ?? recorder.error}</AlertDescription>
           </Alert>
+        )}
+
+        {/* Who and what I am replying to. Sending (text, photo or voice note)
+            attaches it and closes this bar. */}
+        {replyingTo && (
+          <div className="mb-2 flex items-center gap-2 border-l-2 border-primary bg-muted px-3 py-1.5 text-xs">
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="font-medium">
+                {replyingTo.fromMe
+                  ? "Replying to yourself"
+                  : `Replying to @${username}`}
+              </span>
+              <span className="truncate text-muted-foreground">
+                {replyingTo.kind === "image"
+                  ? "Photo"
+                  : replyingTo.kind === "voice"
+                    ? "Voice message"
+                    : snippet(replyingTo.body)}
+              </span>
+            </div>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-6 shrink-0"
+              aria-label="Cancel reply"
+              onClick={() => setReplyingTo(null)}
+            >
+              <IconX className="size-4" aria-hidden="true" />
+            </Button>
+          </div>
         )}
 
         {/* Photos and voice notes are friends only (the server enforces it
