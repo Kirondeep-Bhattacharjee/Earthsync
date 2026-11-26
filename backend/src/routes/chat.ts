@@ -33,6 +33,7 @@ import { areFriends } from "../lib/relationships.js";
 import { usernameSchema } from "../lib/username.js";
 import { markRead, peerMarkers, receiptsMutual, statusSql } from "../lib/receipts.js";
 import { announceDeletion, announceMessage, pushToUser } from "../lib/socket.js";
+import { getDisappearTimer, notExpired } from "../lib/disappearing.js";
 
 const router = Router();
 
@@ -117,7 +118,7 @@ function inboxFilters(viewerId: number) {
     // Unread = the other person sent a message that is newer than my read
     // marker (and newer than anything I deleted). My own messages never count.
     // All comparisons run in SQL so clocks cannot disagree.
-    const hasUnread = sql<boolean>`exists (select 1 from ${messages} where ${messages.conversationId} = ${conversations.id} and ${messages.senderId} <> ${viewerId} and (${myReadAt} is null or ${messages.createdAt} > ${myReadAt}) and (${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore}))`;
+    const hasUnread = sql<boolean>`exists (select 1 from ${messages} where ${messages.conversationId} = ${conversations.id} and ${messages.senderId} <> ${viewerId} and (${myReadAt} is null or ${messages.createdAt} > ${myReadAt}) and (${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore}) and ${notExpired()})`;
 
     return { friendExists, blockedEitherWay, visibleToMe, hasUnread, otherId };
 }
@@ -246,6 +247,7 @@ router.get("/conversations", requireAuth, async (req, res) => {
                 keyVersion: messages.keyVersion,
                 createdAt: messages.createdAt,
                 deletedForEveryoneAt: messages.deletedForEveryoneAt,
+                expiresAt: messages.expiresAt,
             })
             .from(messages)
             .where(
@@ -260,7 +262,9 @@ router.get("/conversations", requireAuth, async (req, res) => {
                                     messages.conversationId,
                                     rows.map((row) => row.conversationId)
                                 ),
-                                sql`not ${hiddenByMe(viewerId)}`
+                                sql`not ${hiddenByMe(viewerId)}`,
+                                // Expired messages are gone from the preview too.
+                                notExpired()
                             )
                         )
                         .groupBy(messages.conversationId)
@@ -291,6 +295,7 @@ router.get("/conversations", requireAuth, async (req, res) => {
                                   : previewText(last.kind, readMessageText(last)),
                               fromMe: last.senderId === viewerId,
                               createdAt: last.createdAt,
+                              expiresAt: last.expiresAt,
                           }
                         : null,
                 };
@@ -392,6 +397,7 @@ router.get(
                     keyVersion: messages.keyVersion,
                     createdAt: messages.createdAt,
                     deletedForEveryoneAt: messages.deletedForEveryoneAt,
+                    expiresAt: messages.expiresAt,
                     // Starred by me (private).
                     starred: sql<boolean>`exists (select 1 from ${messageStars} where ${messageStars.messageId} = ${messages.id} and ${messageStars.userId} = ${viewerId})`,
                     mediaKey: media.key,
@@ -409,7 +415,7 @@ router.get(
                     replyKeyVersion: original.keyVersion,
                     replyCreatedAt: original.createdAt,
                     replyDeletedAt: original.deletedForEveryoneAt,
-                    replyHidden: sql<boolean>`${hiddenByMe(viewerId, original.id)}`,
+                    replyHidden: sql<boolean>`(${hiddenByMe(viewerId, original.id)} or not ${notExpired(original.expiresAt)})`,
                 })
                 .from(messages)
                 .innerJoin(
@@ -428,7 +434,9 @@ router.get(
                             gt(messages.createdAt, myHiddenBefore)
                         ),
                         // Messages I deleted just for myself.
-                        sql`not ${hiddenByMe(viewerId)}`
+                        sql`not ${hiddenByMe(viewerId)}`,
+                        // Expired messages are hidden at once.
+                        notExpired()
                     )
                 )
                 .orderBy(desc(messages.id))
@@ -438,6 +446,15 @@ router.get(
             const oldest = page[page.length - 1];
 
             const isFriend = await areFriends(viewerId, peerId);
+            const disappearAfterSeconds = await getDisappearTimer(viewerId, peerId);
+            // Server clock, so clients can remove expiring messages on time even
+            // when their own clock is off.
+            const [clock] = await db
+                .select({
+                    now: sql<string>`to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+                })
+                .from(conversations)
+                .limit(1);
 
             // The quote above a reply, or null for a normal message. The joined
             // columns are all null when there is no original.
@@ -495,6 +512,8 @@ router.get(
                 messages: chatMessages,
                 nextCursor: rows.length > limit && oldest ? oldest.id : null,
                 isFriend,
+                disappearAfterSeconds,
+                serverNow: clock?.now ?? new Date().toISOString(),
             });
         } catch (error) {
             return handleError(res, error, "Message history");

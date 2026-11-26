@@ -68,6 +68,7 @@ function applyMessage(
       body: previewFor(message),
       fromMe: message.fromMe,
       createdAt: message.createdAt,
+      expiresAt: message.expiresAt ?? null,
     },
   }
 
@@ -143,6 +144,37 @@ export default function Chats() {
       void load({ quiet: true })
     }
   }, [reconnectCount, load])
+
+  // Disappearing messages: when the newest message of a thread expires, the
+  // preview and unread badge change on the server, so refetch quietly then.
+  // Never sooner than 1 second, so a skewed clock can't cause a tight loop.
+  const nextPreviewExpiry =
+    state.status === "ready"
+      ? state.conversations.reduce<number | null>((earliest, item) => {
+          const at = item.lastMessage?.expiresAt
+            ? new Date(item.lastMessage.expiresAt).getTime()
+            : null
+
+          return at !== null && (earliest === null || at < earliest)
+            ? at
+            : earliest
+        }, null)
+      : null
+
+  React.useEffect(() => {
+    if (nextPreviewExpiry === null) {
+      return
+    }
+
+    // setTimeout caps at ~24 days; wake up at least hourly.
+    const wait = Math.min(
+      Math.max(nextPreviewExpiry - Date.now() + 1000, 1000),
+      60 * 60 * 1000
+    )
+    const timer = window.setTimeout(() => void load({ quiet: true }), wait)
+
+    return () => window.clearTimeout(timer)
+  }, [nextPreviewExpiry, load])
 
   // Something changed what is read (a thread was opened and marked read, maybe
   // in another tab): refetch so the highlights are right. This also covers

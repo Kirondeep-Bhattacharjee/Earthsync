@@ -6,10 +6,11 @@ import { handleError, validationError } from "../lib/http.js";
 import { findPeer } from "../lib/chat.js";
 import { listPins, setPinned } from "../lib/chat-pins.js";
 import { listStars, setStarred } from "../lib/chat-stars.js";
-import { announcePin, announceStar } from "../lib/socket.js";
+import { announceDisappearing, announcePin, announceStar } from "../lib/socket.js";
+import { getDisappearTimer, setDisappearTimer } from "../lib/disappearing.js";
 
-// Per-chat actions that are not sending or reading messages: pins and stars now;
-// disappearing messages are added to this file in the next step.
+// Per-chat actions that are not sending or reading messages: pins, stars and
+// the disappearing-messages timer.
 const router = Router();
 
 const messageIdSchema = z.object({
@@ -197,6 +198,77 @@ router.get("/conversations/:username/stars", requireAuth, async (req, res) => {
         return res.json({ stars });
     } catch (error) {
         return handleError(res, error, "List stars");
+    }
+});
+
+/* ------------------------------------------------------------------ */
+/* Disappearing messages                                               */
+/* ------------------------------------------------------------------ */
+
+// null = off, or 24 hours / 7 days / 90 days in seconds. Validated again in
+// setDisappearTimer (400 for anything else).
+const disappearingSchema = z.object({
+    afterSeconds: z.number().int().positive().nullable(),
+});
+
+// Set the timer of a thread. One timer per chat, shared: either person can
+// change it. Only new messages are affected. Same value again is a success.
+router.put(
+    "/conversations/:username/disappearing",
+    requireAuth,
+    actionLimiter,
+    async (req, res) => {
+        const viewerId = req.session.userId;
+
+        if (viewerId === undefined) {
+            return res.status(401).json({ message: "Not authenticated" });
+        }
+
+        const parsed = disappearingSchema.safeParse(req.body ?? {});
+
+        if (!parsed.success) {
+            return validationError(res, parsed.error);
+        }
+
+        try {
+            const peerId = await findPeer(viewerId, req.params.username);
+            const { changed } = await setDisappearTimer(
+                viewerId,
+                peerId,
+                parsed.data.afterSeconds
+            );
+
+            if (changed) {
+                await announceDisappearing({
+                    afterSeconds: parsed.data.afterSeconds,
+                    viewerId,
+                    peerId,
+                });
+            }
+
+            return res.json({ afterSeconds: parsed.data.afterSeconds });
+        } catch (error) {
+            return handleError(res, error, "Set disappearing timer");
+        }
+    }
+);
+
+// The current timer of a thread (null = off).
+router.get("/conversations/:username/disappearing", requireAuth, async (req, res) => {
+    const viewerId = req.session.userId;
+
+    if (viewerId === undefined) {
+        return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    try {
+        const peerId = await findPeer(viewerId, req.params.username);
+
+        return res.json({
+            afterSeconds: await getDisappearTimer(viewerId, peerId),
+        });
+    } catch (error) {
+        return handleError(res, error, "Get disappearing timer");
     }
 });
 

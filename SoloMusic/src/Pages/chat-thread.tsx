@@ -13,6 +13,7 @@ import {
   IconMessageOff,
   IconMicrophone,
   IconPhoto,
+  IconClock,
   IconInfoCircle,
   IconPin,
   IconPinnedOff,
@@ -85,6 +86,11 @@ import {
   setPinned,
   type PinnedMessage,
 } from "@/lib/chat-pins"
+import {
+  DisappearError,
+  disappearLabel,
+  setDisappearing,
+} from "@/lib/chat-disappearing"
 import {
   StarError,
   fetchStars,
@@ -162,6 +168,9 @@ type Item = {
   replyTo: ReplyPreview | null
   // Starred by me (private).
   starred: boolean
+  // Disappearing messages: when this message vanishes from the screen (ISO
+  // time on the SERVER clock), or null = never.
+  expiresAt: string | null
   error: string | null
 }
 
@@ -184,6 +193,9 @@ type MessagesResponse = {
   messages: ChatMessage[]
   nextCursor: number | null
   isFriend: boolean
+  // The chat's timer in seconds (null = off) and the server's clock now.
+  disappearAfterSeconds?: number | null
+  serverNow?: string
 }
 
 const NO_ITEMS: Item[] = []
@@ -319,6 +331,7 @@ function fromServer(message: ChatMessage): Item {
     deleted: message.deleted,
     replyTo: message.replyTo ?? null,
     starred: message.starred ?? false,
+    expiresAt: message.expiresAt ?? null,
     error: null,
   }
 }
@@ -363,6 +376,7 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
             deleted: existing.deleted || message.deleted,
             replyTo: existing.deleted ? null : (message.replyTo ?? null),
             starred: existing.deleted ? false : (message.starred ?? existing.starred),
+            expiresAt: message.expiresAt ?? existing.expiresAt,
             error: null,
           }
         : fromServer(message)
@@ -392,6 +406,40 @@ function applyAck(items: Item[], clientId: string, id: number): Item[] {
       )
   )
 }
+
+// Disappearing messages. `now` is the SERVER's clock (this device's clock plus
+// the measured skew), so a wrong phone clock doesn't make messages vanish early
+// or late. A message with no expiresAt never disappears.
+function isExpired(expiresAt: string | null, now: number): boolean {
+  return expiresAt !== null && new Date(expiresAt).getTime() <= now
+}
+
+// Removes expired messages, and turns any reply quoting one into "Message
+// unavailable" (the server does the same on a refetch).
+function pruneExpired(items: Item[], now: number): Item[] {
+  const gone = new Set<number>()
+
+  for (const item of items) {
+    if (item.id !== null && isExpired(item.expiresAt, now)) {
+      gone.add(item.id)
+    }
+  }
+
+  if (gone.size === 0) {
+    return items
+  }
+
+  return items
+    .filter((item) => item.id === null || !gone.has(item.id))
+    .map((item) =>
+      item.replyTo && gone.has(item.replyTo.id) && !item.replyTo.unavailable
+        ? { ...item, replyTo: { ...item.replyTo, body: null, unavailable: true } }
+        : item
+    )
+}
+
+// setTimeout can't wait longer than about 24 days; wake up at least this often.
+const MAX_TIMER_MS = 60 * 60 * 1000
 
 // Delete for me removes the bubble; delete for everyone keeps it as a
 // "This message was deleted" placeholder. Either way, any reply that quotes it
@@ -668,6 +716,15 @@ export default function ChatThread() {
   const [replyingTo, setReplyingTo] = React.useState<Item | null>(null)
   const [highlightId, setHighlightId] = React.useState<number | null>(null)
 
+  // Disappearing messages: this chat's timer (null = off) and the Chat info
+  // section state. `skewRef` is (server clock - this device's clock), so
+  // messages vanish on the server's time.
+  const [disappearAfter, setDisappearAfter] = React.useState<number | null>(null)
+  const [disappearBusy, setDisappearBusy] = React.useState(false)
+  const [disappearError, setDisappearError] = React.useState<string | null>(null)
+  const skewRef = React.useRef(0)
+  const [expiryTick, setExpiryTick] = React.useState(0)
+
   // The pinned messages of this chat (shared by both people), newest pin first.
   const [pins, setPins] = React.useState<PinnedMessage[]>([])
 
@@ -760,6 +817,18 @@ export default function ChatThread() {
         const data = (await response.json()) as MessagesResponse
 
         fetchedAtRef.current = Date.now()
+
+        if (data.serverNow) {
+          const serverMs = new Date(data.serverNow).getTime()
+
+          if (!Number.isNaN(serverMs)) {
+            skewRef.current = serverMs - Date.now()
+          }
+        }
+
+        if (data.disappearAfterSeconds !== undefined) {
+          setDisappearAfter(data.disappearAfterSeconds)
+        }
 
         setState((previous) =>
           options.quiet && previous.status === "ready"
@@ -888,6 +957,9 @@ export default function ChatThread() {
     setReplyingTo(null)
     setHighlightId(null)
     setPins([])
+    setDisappearAfter(null)
+    setDisappearBusy(false)
+    setDisappearError(null)
     setStars(null)
     setStarsFailed(false)
     infoOpenRef.current = false
@@ -1133,6 +1205,7 @@ export default function ChatThread() {
         receipt: null,
         deleted: false,
         starred: false,
+        expiresAt: null, // the server stamps it; the live message brings it
         replyTo,
         error: null,
       }
@@ -1265,6 +1338,7 @@ export default function ChatThread() {
         receipt: null,
         deleted: false,
         starred: false,
+        expiresAt: null,
         replyTo,
         error: null,
       }
@@ -1412,6 +1486,77 @@ export default function ChatThread() {
     }
   }, [])
 
+  // Disappearing messages, live: wake up when the next message expires and
+  // remove everything that is due (from the thread, the pinned bar, the open
+  // Chat info list and an open reply). Also checks when the tab comes back.
+  const nextExpiry = React.useMemo(() => {
+    let earliest: number | null = null
+
+    for (const item of items) {
+      if (item.id !== null && item.expiresAt) {
+        const at = new Date(item.expiresAt).getTime()
+
+        if (earliest === null || at < earliest) {
+          earliest = at
+        }
+      }
+    }
+
+    return earliest
+  }, [items])
+
+  React.useEffect(() => {
+    function prune() {
+      const now = Date.now() + skewRef.current
+
+      setState((previous) =>
+        previous.status === "ready"
+          ? { ...previous, items: pruneExpired(previous.items, now) }
+          : previous
+      )
+      setPins((current) => {
+        const next = current.filter((pin) => !isExpired(pin.expiresAt, now))
+        return next.length === current.length ? current : next
+      })
+      setStars((current) => {
+        if (!current) {
+          return current
+        }
+
+        const next = current.filter((star) => !isExpired(star.expiresAt, now))
+        return next.length === current.length ? current : next
+      })
+      setReplyingTo((current) =>
+        current && isExpired(current.expiresAt, now) ? null : current
+      )
+      setExpiryTick((tick) => tick + 1)
+    }
+
+    function onVisible() {
+      if (document.visibilityState === "visible") {
+        prune()
+      }
+    }
+
+    document.addEventListener("visibilitychange", onVisible)
+
+    let timer: number | undefined
+
+    if (nextExpiry !== null) {
+      const wait = Math.min(
+        Math.max(nextExpiry - (Date.now() + skewRef.current), 0) + 50,
+        MAX_TIMER_MS
+      )
+
+      timer = window.setTimeout(prune, wait)
+    }
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible)
+      window.clearTimeout(timer)
+    }
+  }, [nextExpiry, expiryTick])
+
   // Live events: the ack gives a pending message its id, an error fails it, and
   // a message for this thread is added (or updated if it is already listed).
   React.useEffect(() => {
@@ -1441,6 +1586,17 @@ export default function ChatThread() {
           if (infoOpenRef.current) {
             void loadStars()
           }
+        }
+
+        return
+      }
+
+      // Either of us changed the disappearing-messages timer. Only new messages
+      // are affected, so nothing on screen changes except the header.
+      if (event.type === "disappearing_changed") {
+        if (event.username === username) {
+          setDisappearAfter(event.afterSeconds)
+          setDisappearError(null)
         }
 
         return
@@ -1651,6 +1807,35 @@ export default function ChatThread() {
     setInfoOpen(open)
   }
 
+  // Changes the shared disappearing timer. The server tells both people (the
+  // socket event updates the header); the radio moves here once it is saved.
+  async function changeDisappear(seconds: number | null) {
+    const requestedFor = username
+
+    setDisappearBusy(true)
+    setDisappearError(null)
+
+    try {
+      await setDisappearing(requestedFor, seconds)
+
+      if (nameRef.current === requestedFor) {
+        setDisappearAfter(seconds)
+      }
+    } catch (error) {
+      if (nameRef.current === requestedFor) {
+        setDisappearError(
+          error instanceof DisappearError
+            ? error.message
+            : "Could not change disappearing messages. Try again."
+        )
+      }
+    } finally {
+      if (nameRef.current === requestedFor) {
+        setDisappearBusy(false)
+      }
+    }
+  }
+
   // Opens the Chat info panel and loads my stars for this chat.
   function openInfo() {
     setStarsFailed(false)
@@ -1848,6 +2033,19 @@ export default function ChatThread() {
           </Avatar>
           <span className="truncate font-medium">@{username}</span>
         </Link>
+
+        {disappearAfter !== null && (
+          <button
+            type="button"
+            onClick={openInfo}
+            aria-label={`Disappearing messages: ${disappearLabel(disappearAfter)}. Open chat info`}
+            title={`Disappearing messages: ${disappearLabel(disappearAfter)}`}
+            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <IconClock className="size-4" aria-hidden="true" />
+            {disappearLabel(disappearAfter)}
+          </button>
+        )}
 
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -2331,6 +2529,10 @@ export default function ChatThread() {
           setStarsFailed(false)
           void loadStars()
         }}
+        disappearAfter={disappearAfter}
+        disappearBusy={disappearBusy}
+        disappearError={disappearError}
+        onChangeDisappear={(seconds) => void changeDisappear(seconds)}
       />
 
       {viewer && (

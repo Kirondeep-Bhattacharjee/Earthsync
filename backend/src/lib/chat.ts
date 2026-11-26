@@ -12,6 +12,7 @@ import {
 } from "../db/schema.js";
 import type { ProcessedChatMedia } from "./chat-media.js";
 import { decryptText, encryptText, messageAad } from "./crypto.js";
+import { expiryFor, notExpired } from "./disappearing.js";
 import { HttpError } from "./http.js";
 import { signChatUrl } from "./r2.js";
 import { areFriends, isBlockedEitherWay } from "./relationships.js";
@@ -75,6 +76,9 @@ export type ChatMessage = {
     deleted: boolean; // deleted for everyone: body and media are null
     starred: boolean; // starred by ME (private, never sent to the other person)
     replyTo: ReplyPreview | null;
+    // Disappearing messages: when this message stops being shown. null = never.
+    // Clients remove it from the screen at this time without a refresh.
+    expiresAt: Date | null;
 };
 
 // The message a new message replies to, as found when sending. senderId lets
@@ -96,6 +100,7 @@ export type SentMessage = {
     media: ChatMedia | null;
     createdAt: Date;
     replyTo: ReplyTarget | null;
+    expiresAt: Date | null;
 };
 
 // A messages row as it is stored.
@@ -109,6 +114,7 @@ export type StoredMessage = {
     keyVersion: number | null;
     createdAt: Date;
     deletedForEveryoneAt?: Date | null;
+    expiresAt?: Date | null;
 };
 
 /* ------------------------------------------------------------------ */
@@ -215,6 +221,7 @@ export function serializeMessage(
         deleted,
         starred: deleted ? false : starred,
         replyTo: deleted ? null : replyTo,
+        expiresAt: row.expiresAt ?? null,
     };
 }
 
@@ -244,6 +251,7 @@ export function chatMessageFromSent(
                   unavailable: false,
               }
             : null,
+        expiresAt: sent.expiresAt,
     };
 }
 
@@ -335,7 +343,9 @@ async function findReplyTarget(
                 or(
                     isNull(senderHiddenBefore),
                     gt(messages.createdAt, senderHiddenBefore)
-                )
+                ),
+                // An expired message can't be replied to.
+                notExpired()
             )
         )
         .limit(1);
@@ -407,7 +417,12 @@ export async function sendMessage(
                 target: [conversations.userLowId, conversations.userHighId],
                 set: { lastMessageAt: sql`now()` },
             })
-            .returning({ id: conversations.id });
+            .returning({
+                id: conversations.id,
+                // Read in the same statement that locks the row, so a timer
+                // change at this very moment is either seen or waits for us.
+                disappearAfterSeconds: conversations.disappearAfterSeconds,
+            });
 
         if (!conversation) {
             throw new Error("Conversation upsert returned no row");
@@ -430,8 +445,13 @@ export async function sendMessage(
                 bodyEnc,
                 keyVersion,
                 replyToId: replyTo?.id,
+                expiresAt: expiryFor(conversation.disappearAfterSeconds),
             })
-            .returning({ id: messages.id, createdAt: messages.createdAt });
+            .returning({
+                id: messages.id,
+                createdAt: messages.createdAt,
+                expiresAt: messages.expiresAt,
+            });
 
         if (!message) {
             throw new Error("Message insert returned no row");
@@ -447,6 +467,7 @@ export async function sendMessage(
             media: null,
             createdAt: message.createdAt,
             replyTo,
+            expiresAt: message.expiresAt,
         };
     });
 }
@@ -555,7 +576,10 @@ export async function sendAttachment(
                 target: [conversations.userLowId, conversations.userHighId],
                 set: { lastMessageAt: sql`now()` },
             })
-            .returning({ id: conversations.id });
+            .returning({
+                id: conversations.id,
+                disappearAfterSeconds: conversations.disappearAfterSeconds,
+            });
 
         if (!conversation) {
             throw new Error("Conversation upsert returned no row");
@@ -590,8 +614,13 @@ export async function sendAttachment(
                 kind,
                 mediaId: mediaRow.id,
                 replyToId: replyTo?.id,
+                expiresAt: expiryFor(conversation.disappearAfterSeconds),
             })
-            .returning({ id: messages.id, createdAt: messages.createdAt });
+            .returning({
+                id: messages.id,
+                createdAt: messages.createdAt,
+                expiresAt: messages.expiresAt,
+            });
 
         if (!row) {
             throw new Error("Message insert returned no row");
@@ -601,6 +630,7 @@ export async function sendAttachment(
             id: row.id,
             conversationId: conversation.id,
             createdAt: row.createdAt,
+            expiresAt: row.expiresAt,
         };
     });
 
@@ -620,6 +650,7 @@ export async function sendAttachment(
         }),
         createdAt: saved.createdAt,
         replyTo,
+        expiresAt: saved.expiresAt,
     };
 }
 
@@ -648,6 +679,7 @@ export async function deleteMessage(
             deletedAt: messages.deletedForEveryoneAt,
             userLowId: conversations.userLowId,
             userHighId: conversations.userHighId,
+            expired: sql<boolean>`not ${notExpired()}`,
             // Compared in SQL so clocks can't disagree.
             inWindow: sql<boolean>`${messages.createdAt} > now() - ${sql.raw(
                 `interval '${DELETE_FOR_EVERYONE_HOURS} hours'`
@@ -658,7 +690,12 @@ export async function deleteMessage(
         .where(eq(messages.id, messageId))
         .limit(1);
 
-    if (!row || (row.userLowId !== viewerId && row.userHighId !== viewerId)) {
+    // An expired message is already gone for both people: same 404.
+    if (
+        !row ||
+        row.expired ||
+        (row.userLowId !== viewerId && row.userHighId !== viewerId)
+    ) {
         throw new HttpError(404, "Message not found");
     }
 

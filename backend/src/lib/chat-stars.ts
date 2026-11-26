@@ -7,6 +7,7 @@ import {
     messages,
 } from "../db/schema.js";
 import { readMessageText, snippet, type MessageKind } from "./chat.js";
+import { notExpired } from "./disappearing.js";
 import { HttpError } from "./http.js";
 import { isBlockedEitherWay } from "./relationships.js";
 
@@ -22,6 +23,9 @@ export type StarredMessage = {
     body: string | null;
     createdAt: Date;
     starredAt: Date;
+    // When the starred message disappears (disappearing messages), or null. A
+    // star does not stop a message from expiring.
+    expiresAt: Date | null;
 };
 
 // Stars or unstars one message. Returns the other person (for the live event)
@@ -46,6 +50,7 @@ export async function setStarred(
             userHighId: conversations.userHighId,
             hidden: sql<boolean>`exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messages.id} and ${messageDeletions.userId} = ${viewerId})`,
             visible: sql<boolean>`(${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore})`,
+            expired: sql<boolean>`not ${notExpired()}`,
         })
         .from(messages)
         .innerJoin(conversations, eq(conversations.id, messages.conversationId))
@@ -76,7 +81,8 @@ export async function setStarred(
         return { peerId, changed: removed.length > 0 };
     }
 
-    if (row.deletedAt !== null || row.hidden || !row.visible) {
+    // An expired message can't be starred (it is already gone).
+    if (row.deletedAt !== null || row.hidden || !row.visible || row.expired) {
         throw new HttpError(404, "Message not found");
     }
 
@@ -113,6 +119,7 @@ export async function listStars(
             bodyEnc: messages.bodyEnc,
             keyVersion: messages.keyVersion,
             createdAt: messages.createdAt,
+            expiresAt: messages.expiresAt,
             starredAt: messageStars.createdAt,
         })
         .from(messageStars)
@@ -127,6 +134,7 @@ export async function listStars(
                 eq(conversations.userLowId, low),
                 eq(conversations.userHighId, high),
                 sql`${messages.deletedForEveryoneAt} is null`,
+                notExpired(),
                 sql`(${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore})`,
                 sql`not exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messages.id} and ${messageDeletions.userId} = ${viewerId})`
             )
@@ -141,5 +149,6 @@ export async function listStars(
         body: row.kind === "text" ? snippet(readMessageText(row)) : null,
         createdAt: row.createdAt,
         starredAt: row.starredAt,
+        expiresAt: row.expiresAt,
     }));
 }

@@ -127,6 +127,13 @@
       "when": 1795684514686,
       "tag": "0017_volatile_aaron_stack",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795692729098,
+      "tag": "0018_chat_disappearing",
+      "breakpoints": true
     }
   ]
 }

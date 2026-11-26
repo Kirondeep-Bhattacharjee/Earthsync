@@ -1,4 +1,5 @@
 import { IconPinnedOff, IconStarOff } from "@tabler/icons-react"
+import { DISAPPEAR_CHOICES } from "@/lib/chat-disappearing"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -14,8 +15,8 @@ import type { StarredMessage } from "@/lib/chat-stars"
 
 // The "Chat info" panel, opened from the chat header menu. It lists this chat's
 // starred messages (private to me) and pinned messages (shared). Tapping a row
-// jumps to that message in the thread. The disappearing-messages timer will be
-// added here as a third section.
+// jumps to that message in the thread. The third section is the shared
+// disappearing-messages timer (either person can change it).
 
 type Row = {
   id: number
@@ -102,6 +103,10 @@ export function ChatInfoSheet({
   onUnstar,
   onUnpin,
   onRetryStars,
+  disappearAfter,
+  disappearBusy,
+  disappearError,
+  onChangeDisappear,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -114,6 +119,11 @@ export function ChatInfoSheet({
   onUnstar: (id: number) => void
   onUnpin: (id: number) => void
   onRetryStars: () => void
+  // Current timer in seconds, null = off.
+  disappearAfter: number | null
+  disappearBusy: boolean
+  disappearError: string | null
+  onChangeDisappear: (seconds: number | null) => void
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -188,6 +198,60 @@ export function ChatInfoSheet({
                 ))}
               </ul>
             )}
+          </section>
+
+          <section
+            aria-labelledby="disappearing-heading"
+            className="flex flex-col gap-2"
+          >
+            <h3 id="disappearing-heading" className="text-xs font-medium">
+              Disappearing messages
+            </h3>
+            <p className="text-muted-foreground">
+              New messages disappear for both of you after this time. Older
+              messages stay. Either of you can change it.
+            </p>
+
+            <div
+              role="radiogroup"
+              aria-labelledby="disappearing-heading"
+              className="flex flex-col gap-1"
+            >
+              {DISAPPEAR_CHOICES.map((choice) => {
+                const selected = choice.seconds === disappearAfter
+
+                return (
+                  <button
+                    key={choice.label}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={disappearBusy}
+                    onClick={() => {
+                      if (!selected) {
+                        onChangeDisappear(choice.seconds)
+                      }
+                    }}
+                    className="flex items-center gap-2 rounded-md border px-3 py-2 text-left outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 aria-checked:border-primary aria-checked:bg-muted"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        "size-3 shrink-0 rounded-full border " +
+                        (selected ? "border-primary bg-primary" : "")
+                      }
+                    />
+                    {choice.label}
+                  </button>
+                )
+              })}
+            </div>
+
+            {disappearError ? (
+              <p role="alert" className="text-destructive">
+                {disappearError}
+              </p>
+            ) : null}
           </section>
         </div>
       </SheetContent>

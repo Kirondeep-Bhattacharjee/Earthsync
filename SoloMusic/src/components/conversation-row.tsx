@@ -18,6 +18,8 @@ export type Conversation = {
     body: string
     fromMe: boolean
     createdAt: string
+    // When this message disappears (disappearing messages), or null.
+    expiresAt?: string | null
   } | null
 }
 

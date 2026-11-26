@@ -7,6 +7,7 @@ import {
     messages,
 } from "../db/schema.js";
 import { readMessageText, snippet, type MessageKind } from "./chat.js";
+import { notExpired } from "./disappearing.js";
 import { HttpError } from "./http.js";
 import { isBlockedEitherWay } from "./relationships.js";
 
@@ -22,6 +23,9 @@ export type PinnedMessage = {
     body: string | null;
     createdAt: Date;
     pinnedAt: Date;
+    // When the pinned message disappears (disappearing messages), or null. A
+    // pin does not stop a message from expiring.
+    expiresAt: Date | null;
 };
 
 // Pins or unpins one message. Returns the other person (so the caller can push
@@ -48,6 +52,7 @@ export async function setPinned(
             userHighId: conversations.userHighId,
             hidden: sql<boolean>`exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messages.id} and ${messageDeletions.userId} = ${viewerId})`,
             visible: sql<boolean>`(${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore})`,
+            expired: sql<boolean>`not ${notExpired()}`,
         })
         .from(messages)
         .innerJoin(conversations, eq(conversations.id, messages.conversationId))
@@ -73,7 +78,8 @@ export async function setPinned(
         return { peerId, changed: removed.length > 0 };
     }
 
-    if (row.deletedAt !== null || row.hidden || !row.visible) {
+    // An expired message can't be pinned (it is already gone).
+    if (row.deletedAt !== null || row.hidden || !row.visible || row.expired) {
         throw new HttpError(404, "Message not found");
     }
 
@@ -137,6 +143,7 @@ export async function listPins(
             bodyEnc: messages.bodyEnc,
             keyVersion: messages.keyVersion,
             createdAt: messages.createdAt,
+            expiresAt: messages.expiresAt,
             pinnedAt: messagePins.createdAt,
         })
         .from(messagePins)
@@ -150,6 +157,7 @@ export async function listPins(
                 eq(conversations.userLowId, low),
                 eq(conversations.userHighId, high),
                 sql`${messages.deletedForEveryoneAt} is null`,
+                notExpired(),
                 sql`(${myHiddenBefore} is null or ${messages.createdAt} > ${myHiddenBefore})`,
                 sql`not exists (select 1 from ${messageDeletions} where ${messageDeletions.messageId} = ${messages.id} and ${messageDeletions.userId} = ${viewerId})`
             )
@@ -163,5 +171,6 @@ export async function listPins(
         body: row.kind === "text" ? snippet(readMessageText(row)) : null,
         createdAt: row.createdAt,
         pinnedAt: row.pinnedAt,
+        expiresAt: row.expiresAt,
     }));
 }

@@ -45,6 +45,8 @@ export type ChatMessage = {
   deleted: boolean // deleted for everyone: body and media are null
   starred: boolean // starred by ME (private)
   replyTo: ReplyPreview | null
+  // Disappearing messages: when this message vanishes, or null = never.
+  expiresAt: string | null
 }
 
 export type ServerEvent =
@@ -72,6 +74,9 @@ export type ServerEvent =
   // One of MY messages in the thread with `username` was starred or unstarred
   // (in another tab of mine). Stars are private: the other person never gets this.
   | { type: "message_starred"; username: string; id: number; starred: boolean }
+  // The disappearing-messages timer of the thread with `username` changed
+  // (afterSeconds null = off). Sent to both people.
+  | { type: "disappearing_changed"; username: string; afterSeconds: number | null }
   | { type: "error"; status: number; message: string; clientId?: string }
 
 export type ConnectionStatus = "connecting" | "open" | "closed"
@@ -134,6 +139,7 @@ function parseEvent(raw: unknown): ServerEvent | null {
       json.type === "message_deleted" ||
       json.type === "message_pinned" ||
       json.type === "message_starred" ||
+      json.type === "disappearing_changed" ||
       json.type === "error"
     ) {
       return json as ServerEvent

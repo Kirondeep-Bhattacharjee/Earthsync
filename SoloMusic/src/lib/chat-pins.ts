@@ -12,6 +12,7 @@ export type PinnedMessage = {
   body: string | null
   createdAt: string
   pinnedAt: string
+  expiresAt: string | null // when it disappears (a pin does not stop that)
 }
 
 // Carries a message that is safe to show to the person.

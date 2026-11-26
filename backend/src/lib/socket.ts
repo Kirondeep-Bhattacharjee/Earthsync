@@ -62,6 +62,9 @@ function allowedOrigin(): string {
 //   { type: "message_deleted", username, id, scope }   a message in the thread with `username` was deleted;
 //                                                      scope "me" goes only to the person who hid it,
 //                                                      "everyone" goes to both
+//   { type: "disappearing_changed", username, afterSeconds }
+//                                                      the timer of the thread with `username` changed
+//                                                      (afterSeconds null = off); sent to both people
 //   { type: "error", status, message, clientId? }      something was rejected
 //
 // Clients dedupe by chatMessage.id (the sender's own socket gets ack and message).
@@ -305,6 +308,42 @@ export async function announceStar(args: {
         });
     } catch (error) {
         console.error("Announce star error:", error);
+    }
+}
+
+// Tells both people the disappearing-messages timer of their thread changed,
+// on every tab. Each side names the thread by the other person's username.
+// Never throws: the change is saved.
+export async function announceDisappearing(args: {
+    afterSeconds: number | null;
+    viewerId: number;
+    peerId: number;
+}): Promise<void> {
+    try {
+        const rows = await db
+            .select({ userId: profiles.userId, username: profiles.username })
+            .from(profiles)
+            .where(inArray(profiles.userId, [args.viewerId, args.peerId]));
+
+        const viewerName = rows.find((row) => row.userId === args.viewerId)?.username;
+        const peerName = rows.find((row) => row.userId === args.peerId)?.username;
+
+        if (!viewerName || !peerName) {
+            return;
+        }
+
+        pushToUser(args.viewerId, {
+            type: "disappearing_changed",
+            username: peerName,
+            afterSeconds: args.afterSeconds,
+        });
+        pushToUser(args.peerId, {
+            type: "disappearing_changed",
+            username: viewerName,
+            afterSeconds: args.afterSeconds,
+        });
+    } catch (error) {
+        console.error("Announce disappearing error:", error);
     }
 }
 

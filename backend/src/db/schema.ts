@@ -270,9 +270,19 @@ export const conversations = pgTable(
         highDeliveredAt: timestamp("high_delivered_at"),
         // Set by a report so the retention job keeps this thread as evidence.
         retentionHold: boolean("retention_hold").notNull().default(false),
+        // Disappearing messages: one timer for the whole chat, shared by both
+        // people (either can change it). null = off. Only NEW messages are
+        // affected: each message gets its own expires_at when it is sent.
+        disappearAfterSeconds: integer("disappear_after_seconds"),
     },
     (t) => [
         check("conversations_ordered", sql`${t.userLowId} < ${t.userHighId}`),
+        // The allowed choices (24 hours, 7 days, 90 days) live in code, so a new
+        // choice needs no migration; the database only refuses nonsense.
+        check(
+            "conversations_disappear_positive",
+            sql`${t.disappearAfterSeconds} IS NULL OR ${t.disappearAfterSeconds} > 0`
+        ),
         // One thread per pair; also the lookup when sending a message.
         uniqueIndex("conversations_pair_idx").on(t.userLowId, t.userHighId),
         // Inbox: "my conversations, newest first", from either side of the pair.
@@ -325,6 +335,11 @@ export const messages = pgTable(
         // purge job nulls body/body_enc/media_id; the row stays so the
         // "This message was deleted" placeholder survives.
         deletedForEveryoneAt: timestamp("deleted_for_everyone_at"),
+        // Disappearing messages: stamped when the message is sent (created_at +
+        // the chat's timer at that moment). null = never expires. From this time
+        // on every read path hides the message; the retention job deletes the
+        // content later.
+        expiresAt: timestamp("expires_at"),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [
@@ -345,6 +360,10 @@ export const messages = pgTable(
         index("messages_deleted_idx")
             .on(t.deletedForEveryoneAt)
             .where(sql`${t.deletedForEveryoneAt} IS NOT NULL`),
+        // The retention job only looks at messages that have an expiry.
+        index("messages_expires_idx")
+            .on(t.expiresAt)
+            .where(sql`${t.expiresAt} IS NOT NULL`),
     ]
 )
 

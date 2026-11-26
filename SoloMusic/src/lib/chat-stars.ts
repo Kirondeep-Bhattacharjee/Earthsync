@@ -13,6 +13,7 @@ export type StarredMessage = {
   body: string | null
   createdAt: string
   starredAt: string
+  expiresAt: string | null // when it disappears (a star does not stop that)
 }
 
 // Carries a message that is safe to show to the person.
