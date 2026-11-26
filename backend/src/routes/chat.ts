@@ -438,7 +438,7 @@ router.get(
 
             // The quote above a reply, or null for a normal message. The joined
             // columns are all null when there is no original.
-            function quoteOf(row: (typeof rows)[number]) {
+            const quoteOf = (row: (typeof rows)[number]) => {
                 if (
                     row.replyId === null ||
                     row.replyConversationId === null ||
