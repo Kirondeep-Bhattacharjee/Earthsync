@@ -73,6 +73,7 @@ export type ChatMessage = {
     fromMe: boolean;
     status: ReceiptStatus | null; // only for my own messages
     deleted: boolean; // deleted for everyone: body and media are null
+    starred: boolean; // starred by ME (private, never sent to the other person)
     replyTo: ReplyPreview | null;
 };
 
@@ -195,7 +196,8 @@ export function serializeMessage(
     viewerId: number,
     media: ChatMedia | null = null,
     status: ReceiptStatus = "sent",
-    replyTo: ReplyPreview | null = null
+    replyTo: ReplyPreview | null = null,
+    starred = false
 ): ChatMessage {
     const fromMe = row.senderId === viewerId;
     // Deleted for everyone: the row stays in the database for now, but no
@@ -211,6 +213,7 @@ export function serializeMessage(
         fromMe,
         status: fromMe ? status : null,
         deleted,
+        starred: deleted ? false : starred,
         replyTo: deleted ? null : replyTo,
     };
 }
@@ -231,6 +234,7 @@ export function chatMessageFromSent(
         fromMe,
         status: fromMe ? "sent" : null,
         deleted: false,
+        starred: false,
         replyTo: sent.replyTo
             ? {
                   id: sent.replyTo.id,

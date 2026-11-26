@@ -5,10 +5,11 @@ import { requireAuth } from "../middlewares/requireAuth.js";
 import { handleError, validationError } from "../lib/http.js";
 import { findPeer } from "../lib/chat.js";
 import { listPins, setPinned } from "../lib/chat-pins.js";
-import { announcePin } from "../lib/socket.js";
+import { listStars, setStarred } from "../lib/chat-stars.js";
+import { announcePin, announceStar } from "../lib/socket.js";
 
-// Per-chat actions that are not sending or reading messages: pins now; stars and
-// disappearing messages are added to this file in the next steps.
+// Per-chat actions that are not sending or reading messages: pins and stars now;
+// disappearing messages are added to this file in the next step.
 const router = Router();
 
 const messageIdSchema = z.object({
@@ -109,6 +110,93 @@ router.get("/conversations/:username/pins", requireAuth, async (req, res) => {
         return res.json({ pins });
     } catch (error) {
         return handleError(res, error, "List pins");
+    }
+});
+
+/* ------------------------------------------------------------------ */
+/* Star                                                                */
+/* ------------------------------------------------------------------ */
+
+// Star a message. Private: only I see it. Starring twice is a success.
+router.post("/messages/:id/star", requireAuth, actionLimiter, async (req, res) => {
+    const viewerId = req.session.userId;
+
+    if (viewerId === undefined) {
+        return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    const parsed = messageIdSchema.safeParse(req.params);
+
+    if (!parsed.success) {
+        return validationError(res, parsed.error);
+    }
+
+    try {
+        const { peerId, changed } = await setStarred(viewerId, parsed.data.id, true);
+
+        if (changed) {
+            await announceStar({
+                messageId: parsed.data.id,
+                starred: true,
+                viewerId,
+                peerId,
+            });
+        }
+
+        return res.json({ message: "Message starred" });
+    } catch (error) {
+        return handleError(res, error, "Star message");
+    }
+});
+
+// Unstar a message. Idempotent.
+router.delete("/messages/:id/star", requireAuth, actionLimiter, async (req, res) => {
+    const viewerId = req.session.userId;
+
+    if (viewerId === undefined) {
+        return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    const parsed = messageIdSchema.safeParse(req.params);
+
+    if (!parsed.success) {
+        return validationError(res, parsed.error);
+    }
+
+    try {
+        const { peerId, changed } = await setStarred(viewerId, parsed.data.id, false);
+
+        if (changed) {
+            await announceStar({
+                messageId: parsed.data.id,
+                starred: false,
+                viewerId,
+                peerId,
+            });
+        }
+
+        return res.json({ message: "Message unstarred" });
+    } catch (error) {
+        return handleError(res, error, "Unstar message");
+    }
+});
+
+// My starred messages in one thread, newest star first (for the Chat info
+// panel). No stars is an empty list.
+router.get("/conversations/:username/stars", requireAuth, async (req, res) => {
+    const viewerId = req.session.userId;
+
+    if (viewerId === undefined) {
+        return res.status(401).json({ message: "Not authenticated" });
+    }
+
+    try {
+        const peerId = await findPeer(viewerId, req.params.username);
+        const stars = await listStars(viewerId, peerId);
+
+        return res.json({ stars });
+    } catch (error) {
+        return handleError(res, error, "List stars");
     }
 });
 

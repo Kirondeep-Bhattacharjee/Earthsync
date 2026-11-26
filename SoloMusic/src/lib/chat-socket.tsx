@@ -43,6 +43,7 @@ export type ChatMessage = {
   fromMe: boolean
   status: ReceiptStatus | null // only for my own messages
   deleted: boolean // deleted for everyone: body and media are null
+  starred: boolean // starred by ME (private)
   replyTo: ReplyPreview | null
 }
 
@@ -68,6 +69,9 @@ export type ServerEvent =
     }
   // A message in the thread with `username` was pinned or unpinned.
   | { type: "message_pinned"; username: string; id: number; pinned: boolean }
+  // One of MY messages in the thread with `username` was starred or unstarred
+  // (in another tab of mine). Stars are private: the other person never gets this.
+  | { type: "message_starred"; username: string; id: number; starred: boolean }
   | { type: "error"; status: number; message: string; clientId?: string }
 
 export type ConnectionStatus = "connecting" | "open" | "closed"
@@ -129,6 +133,7 @@ function parseEvent(raw: unknown): ServerEvent | null {
       json.type === "receipt" ||
       json.type === "message_deleted" ||
       json.type === "message_pinned" ||
+      json.type === "message_starred" ||
       json.type === "error"
     ) {
       return json as ServerEvent

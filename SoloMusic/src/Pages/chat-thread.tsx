@@ -13,9 +13,12 @@ import {
   IconMessageOff,
   IconMicrophone,
   IconPhoto,
+  IconInfoCircle,
   IconPin,
   IconPinnedOff,
   IconSend,
+  IconStar,
+  IconStarOff,
   IconTrash,
   IconX,
 } from "@tabler/icons-react"
@@ -37,6 +40,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -65,6 +69,7 @@ import {
 } from "@/components/ui/message-scroller"
 import { ChatThreadSkeleton } from "@/components/skeletons/chat-thread-skeleton"
 import { MediaViewer } from "@/components/chat/media-viewer"
+import { ChatInfoSheet } from "@/components/chat/chat-info-sheet"
 import { PinnedBar } from "@/components/chat/pinned-bar"
 import { VoicePlayer } from "@/components/chat/voice-player"
 import {
@@ -80,6 +85,12 @@ import {
   setPinned,
   type PinnedMessage,
 } from "@/lib/chat-pins"
+import {
+  StarError,
+  fetchStars,
+  setStarred,
+  type StarredMessage,
+} from "@/lib/chat-stars"
 import {
   useChatSocket,
   type ChatMedia,
@@ -149,6 +160,8 @@ type Item = {
   deleted: boolean
   // The message this one replies to (a short quote), or null.
   replyTo: ReplyPreview | null
+  // Starred by me (private).
+  starred: boolean
   error: string | null
 }
 
@@ -305,6 +318,7 @@ function fromServer(message: ChatMessage): Item {
     receipt: message.status,
     deleted: message.deleted,
     replyTo: message.replyTo ?? null,
+    starred: message.starred ?? false,
     error: null,
   }
 }
@@ -348,6 +362,7 @@ function mergePage(items: Item[], messages: ChatMessage[]): Item[] {
             // A deleted message never comes back.
             deleted: existing.deleted || message.deleted,
             replyTo: existing.deleted ? null : (message.replyTo ?? null),
+            starred: existing.deleted ? false : (message.starred ?? existing.starred),
             error: null,
           }
         : fromServer(message)
@@ -387,7 +402,14 @@ function applyDeletion(items: Item[], id: number, scope: DeleteScope): Item[] {
       ? items.filter((item) => item.id !== id)
       : items.map((item) =>
           item.id === id
-            ? { ...item, deleted: true, body: null, media: null, replyTo: null }
+            ? {
+                ...item,
+                deleted: true,
+                body: null,
+                media: null,
+                replyTo: null,
+                starred: false,
+              }
             : item
         )
 
@@ -444,17 +466,22 @@ function ReceiptTicks({ status }: { status: ReceiptStatus }) {
 function MessageMenu({
   align,
   pinned,
+  starred,
   onReply,
   onTogglePin,
+  onToggleStar,
   onDeleteForMe,
   onDeleteForEveryone,
 }: {
   align: "start" | "end"
   // Whether this message is pinned right now (the item reads Unpin instead).
   pinned: boolean
-  // Null for a message that can't be replied to or pinned (a deleted one).
+  // Whether I starred this message (the item reads Unstar instead).
+  starred: boolean
+  // Null for a message that can't be replied to, pinned or starred (a deleted one).
   onReply: (() => void) | null
   onTogglePin: (() => void) | null
+  onToggleStar: (() => void) | null
   onDeleteForMe: () => void
   onDeleteForEveryone: (() => void) | null
 }) {
@@ -487,6 +514,16 @@ function MessageMenu({
               <IconPin aria-hidden="true" />
             )}
             {pinned ? "Unpin" : "Pin"}
+          </DropdownMenuItem>
+        )}
+        {onToggleStar && (
+          <DropdownMenuItem onClick={onToggleStar}>
+            {starred ? (
+              <IconStarOff aria-hidden="true" />
+            ) : (
+              <IconStar aria-hidden="true" />
+            )}
+            {starred ? "Unstar" : "Star"}
           </DropdownMenuItem>
         )}
         <DropdownMenuItem onClick={onDeleteForMe}>
@@ -634,6 +671,14 @@ export default function ChatThread() {
   // The pinned messages of this chat (shared by both people), newest pin first.
   const [pins, setPins] = React.useState<PinnedMessage[]>([])
 
+  // The Chat info panel and my starred messages in this chat. `stars` is null
+  // until the panel is opened (the list is loaded on demand).
+  const [infoOpen, setInfoOpen] = React.useState(false)
+  const [stars, setStars] = React.useState<StarredMessage[] | null>(null)
+  const [starsFailed, setStarsFailed] = React.useState(false)
+  // Read by the socket handler, which must not resubscribe when the panel opens.
+  const infoOpenRef = React.useRef(false)
+
   // The photo open in the full-screen viewer, and the message being deleted.
   const [viewer, setViewer] = React.useState<ChatMedia | null>(null)
   const [pendingDelete, setPendingDelete] = React.useState<{
@@ -761,6 +806,39 @@ export default function ChatThread() {
     }
   }, [username])
 
+  // The starred list is only fetched while the Chat info panel is open.
+  const loadStars = React.useCallback(async () => {
+    const requestedFor = username
+
+    try {
+      const list = await fetchStars(requestedFor)
+
+      if (nameRef.current === requestedFor) {
+        setStars(list)
+        setStarsFailed(false)
+      }
+    } catch {
+      if (nameRef.current === requestedFor) {
+        setStarsFailed(true)
+      }
+    }
+  }, [username])
+
+  // Sets the star flag on a message that is in the list (older ones that are
+  // not loaded have no icon to update).
+  const patchStar = React.useCallback((id: number, starred: boolean) => {
+    setState((previous) =>
+      previous.status === "ready"
+        ? {
+            ...previous,
+            items: previous.items.map((item) =>
+              item.id === id ? { ...item, starred } : item
+            ),
+          }
+        : previous
+    )
+  }, [])
+
   const seenReconnectRef = React.useRef(reconnectCount)
 
   // Tells the server everything in this thread has been seen, then refreshes the
@@ -810,6 +888,10 @@ export default function ChatThread() {
     setReplyingTo(null)
     setHighlightId(null)
     setPins([])
+    setStars(null)
+    setStarsFailed(false)
+    infoOpenRef.current = false
+    setInfoOpen(false)
 
     if (!username) {
       setState({ status: "not-found" })
@@ -1050,6 +1132,7 @@ export default function ChatThread() {
         status: "sending",
         receipt: null,
         deleted: false,
+        starred: false,
         replyTo,
         error: null,
       }
@@ -1181,6 +1264,7 @@ export default function ChatThread() {
         status: "sending",
         receipt: null,
         deleted: false,
+        starred: false,
         replyTo,
         error: null,
       }
@@ -1349,6 +1433,19 @@ export default function ChatThread() {
         return
       }
 
+      // I starred or unstarred a message in another tab.
+      if (event.type === "message_starred") {
+        if (event.username === username) {
+          patchStar(event.id, event.starred)
+
+          if (infoOpenRef.current) {
+            void loadStars()
+          }
+        }
+
+        return
+      }
+
       // A message was pinned or unpinned, by me in another tab or by them.
       if (event.type === "message_pinned") {
         if (event.username === username) {
@@ -1378,6 +1475,9 @@ export default function ChatThread() {
             current && current.id === deletedId ? null : current
           )
           setPins((current) => current.filter((pin) => pin.id !== deletedId))
+          setStars((current) =>
+            current ? current.filter((star) => star.id !== deletedId) : current
+          )
         }
 
         return
@@ -1425,7 +1525,16 @@ export default function ChatThread() {
         }
       }
     })
-  }, [subscribe, username, clearTimer, patchItem, markRead, loadPins])
+  }, [
+    subscribe,
+    username,
+    clearTimer,
+    patchItem,
+    markRead,
+    loadPins,
+    loadStars,
+    patchStar,
+  ])
 
   React.useEffect(() => {
     const timers = timersRef.current
@@ -1515,6 +1624,9 @@ export default function ChatThread() {
         current && current.id === id ? null : current
       )
       setPins((current) => current.filter((pin) => pin.id !== id))
+      setStars((current) =>
+        current ? current.filter((star) => star.id !== id) : current
+      )
       setPendingDelete(null)
     } catch (error) {
       setMessageDeleteError(
@@ -1530,6 +1642,84 @@ export default function ChatThread() {
   function askDelete(item: Item, scope: DeleteScope) {
     setMessageDeleteError(null)
     setPendingDelete({ item, scope })
+  }
+
+  /* ----------------------------- star ------------------------------ */
+
+  function setInfo(open: boolean) {
+    infoOpenRef.current = open
+    setInfoOpen(open)
+  }
+
+  // Opens the Chat info panel and loads my stars for this chat.
+  function openInfo() {
+    setStarsFailed(false)
+    setInfo(true)
+    void loadStars()
+  }
+
+  // Stars or unstars one saved message. The icon changes at once and is put
+  // back if the server says no. Stars are private, so no one else is told.
+  async function toggleStar(item: Item, star: boolean) {
+    if (item.id === null) {
+      return
+    }
+
+    const id = item.id
+
+    setComposerError(null)
+    patchStar(id, star)
+
+    try {
+      await setStarred(id, star)
+
+      if (infoOpenRef.current) {
+        void loadStars()
+      }
+    } catch (error) {
+      patchStar(id, !star)
+      setComposerError(
+        error instanceof StarError
+          ? error.message
+          : "Could not update the star. Try again."
+      )
+    }
+  }
+
+  // Unstar from the panel (the message may be older than what is loaded).
+  async function unstarFromPanel(id: number) {
+    setStars((current) =>
+      current ? current.filter((star) => star.id !== id) : current
+    )
+    patchStar(id, false)
+
+    try {
+      await setStarred(id, false)
+    } catch (error) {
+      patchStar(id, true)
+      void loadStars()
+      setComposerError(
+        error instanceof StarError
+          ? error.message
+          : "Could not unstar the message. Try again."
+      )
+    }
+  }
+
+  // Unpin from the panel: the same request as the message menu.
+  async function unpinFromPanel(id: number) {
+    setComposerError(null)
+
+    try {
+      await setPinned(id, false)
+      await loadPins()
+    } catch (error) {
+      setComposerError(
+        error instanceof PinError
+          ? error.message
+          : "Could not update the pin. Try again."
+      )
+    }
   }
 
   /* ------------------------------ pin ------------------------------ */
@@ -1667,6 +1857,11 @@ export default function ChatThread() {
             <IconDotsVertical aria-hidden="true" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={openInfo}>
+              <IconInfoCircle aria-hidden="true" />
+              Chat info
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               variant="destructive"
               onClick={() => setDeleteOpen(true)}
@@ -1751,9 +1946,15 @@ export default function ChatThread() {
                   <MessageMenu
                     align={item.fromMe ? "end" : "start"}
                     pinned={isPinned}
+                    starred={item.starred}
                     onReply={item.deleted ? null : () => setReplyingTo(item)}
                     onTogglePin={
                       item.deleted ? null : () => void togglePin(item, !isPinned)
+                    }
+                    onToggleStar={
+                      item.deleted
+                        ? null
+                        : () => void toggleStar(item, !item.starred)
                     }
                     onDeleteForMe={() => askDelete(item, "me")}
                     onDeleteForEveryone={
@@ -1916,6 +2117,19 @@ export default function ChatThread() {
                                   >
                                     <IconPin
                                       className="size-3.5"
+                                      aria-hidden="true"
+                                    />
+                                  </span>
+                                )}
+                                {item.starred && !item.deleted && (
+                                  <span
+                                    role="img"
+                                    aria-label="Starred"
+                                    title="Starred"
+                                    className="inline-flex items-center"
+                                  >
+                                    <IconStar
+                                      className="size-3.5 fill-current"
                                       aria-hidden="true"
                                     />
                                   </span>
@@ -2097,6 +2311,27 @@ export default function ChatThread() {
           </InputGroup>
         )}
       </div>
+
+      {/* Chat info: my stars (private) and the pins (shared). Tapping a row
+          closes the panel and jumps to that message. */}
+      <ChatInfoSheet
+        open={infoOpen}
+        onOpenChange={setInfo}
+        username={username}
+        stars={stars}
+        starsFailed={starsFailed}
+        pins={pins}
+        onJump={(id) => {
+          setInfo(false)
+          void jumpToMessage(id)
+        }}
+        onUnstar={(id) => void unstarFromPanel(id)}
+        onUnpin={(id) => void unpinFromPanel(id)}
+        onRetryStars={() => {
+          setStarsFailed(false)
+          void loadStars()
+        }}
+      />
 
       {viewer && (
         <MediaViewer

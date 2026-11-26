@@ -1,7 +1,7 @@
 import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import type { Request, Response } from "express";
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import { z } from "zod";
 import { db } from "../db/index.js";
@@ -274,6 +274,37 @@ export async function announcePin(args: {
         });
     } catch (error) {
         console.error("Announce pin error:", error);
+    }
+}
+
+// A star is private, so only MY other tabs are told (the other person never
+// hears about it). The thread is named by the other person's username. Never
+// throws: the change is saved.
+export async function announceStar(args: {
+    messageId: number;
+    starred: boolean;
+    viewerId: number;
+    peerId: number;
+}): Promise<void> {
+    try {
+        const [peer] = await db
+            .select({ username: profiles.username })
+            .from(profiles)
+            .where(eq(profiles.userId, args.peerId))
+            .limit(1);
+
+        if (!peer) {
+            return;
+        }
+
+        pushToUser(args.viewerId, {
+            type: "message_starred",
+            username: peer.username,
+            id: args.messageId,
+            starred: args.starred,
+        });
+    } catch (error) {
+        console.error("Announce star error:", error);
     }
 }
 

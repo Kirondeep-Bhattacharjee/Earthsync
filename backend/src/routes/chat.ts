@@ -10,6 +10,7 @@ import {
     friendships,
     media,
     messageDeletions,
+    messageStars,
     messages,
     profiles,
 } from "../db/schema.js";
@@ -391,6 +392,8 @@ router.get(
                     keyVersion: messages.keyVersion,
                     createdAt: messages.createdAt,
                     deletedForEveryoneAt: messages.deletedForEveryoneAt,
+                    // Starred by me (private).
+                    starred: sql<boolean>`exists (select 1 from ${messageStars} where ${messageStars.messageId} = ${messages.id} and ${messageStars.userId} = ${viewerId})`,
                     mediaKey: media.key,
                     mediaThumbKey: media.thumbKey,
                     mediaWidth: media.width,
@@ -482,7 +485,8 @@ router.get(
                               })
                             : null,
                         row.status,
-                        quoteOf(row)
+                        quoteOf(row),
+                        row.starred
                     )
                 )
             );
