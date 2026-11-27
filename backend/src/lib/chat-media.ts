@@ -42,6 +42,14 @@ const ALLOWED_AUDIO_FORMATS = new Set([
     "wav",
 ]);
 
+// The waveform: how many bars, and the sample rate the audio is analysed at
+// (8 kHz is plenty for loudness and keeps a 60 second note under 1 MB).
+export const WAVEFORM_BARS = 48;
+const WAVEFORM_SAMPLE_RATE = 8000;
+// Quieter than this (out of 32768) counts as silence, so a note of faint
+// background hiss isn't stretched into full-height bars.
+const WAVEFORM_SILENCE_PEAK = 64;
+
 let activeVoiceJobs = 0;
 
 /* ------------------------------------------------------------------ */
@@ -57,6 +65,10 @@ export type ProcessedChatMedia = {
     width: number | null;
     height: number | null;
     durationSeconds: number | null;
+    // Voice notes: WAVEFORM_BARS loudness values (0 to 255) for the bars in the
+    // player, all zeros for a silent note. null for photos, and for a voice note
+    // whose waveform could not be computed (the player then draws a stand-in).
+    waveform: number[] | null;
     sha256: string; // of `body`, the bytes that are stored
 };
 
@@ -91,6 +103,7 @@ export async function processChatImage(
         width: processed.width,
         height: processed.height,
         durationSeconds: null,
+        waveform: null,
         sha256: sha256(processed.body),
     };
 }
@@ -163,6 +176,75 @@ async function probeAudio(
     const duration = Number(parsed.format?.duration);
 
     return { duration: Number.isFinite(duration) ? duration : null };
+}
+
+// Turns raw 16-bit little-endian mono samples into `bars` loudness values from
+// 0 to 255: the loudest sample in each slice of the note, scaled so the loudest
+// slice is 255, with a square root so quiet parts stay visible. A note with no
+// real sound gives all zeros. Pure function (no ffmpeg), so it can be tested.
+export function waveformFromPcm(pcm: Buffer, bars = WAVEFORM_BARS): number[] {
+    const samples = Math.floor(pcm.length / 2);
+    const peaks = new Array<number>(bars).fill(0);
+
+    if (samples === 0) {
+        return peaks;
+    }
+
+    for (let i = 0; i < samples; i += 1) {
+        const value = Math.abs(pcm.readInt16LE(i * 2));
+        const bar = Math.min(bars - 1, Math.floor((i * bars) / samples));
+
+        if (value > (peaks[bar] ?? 0)) {
+            peaks[bar] = value;
+        }
+    }
+
+    const loudest = Math.max(...peaks);
+
+    if (loudest < WAVEFORM_SILENCE_PEAK) {
+        return new Array<number>(bars).fill(0);
+    }
+
+    return peaks.map((peak) => Math.round(255 * Math.sqrt(peak / loudest)));
+}
+
+// Decodes our own converted note to raw samples and measures it. Best effort: a
+// failure returns null and the note is still sent, with a stand-in waveform.
+async function computeWaveform(
+    audioPath: string,
+    workDir: string
+): Promise<number[] | null> {
+    const pcmPath = join(workDir, "wave.pcm");
+
+    try {
+        await run(
+            ffmpegPath as string,
+            [
+                "-y",
+                "-loglevel",
+                "error",
+                ...SAFE_INPUT,
+                "-i",
+                audioPath,
+                "-t",
+                String(VOICE_MAX_SECONDS + 1),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                String(WAVEFORM_SAMPLE_RATE),
+                "-f",
+                "s16le",
+                pcmPath,
+            ],
+            FFMPEG_TIMEOUT_MS
+        );
+
+        return waveformFromPcm(await readFile(pcmPath));
+    } catch (error) {
+        console.error("Waveform failed:", error);
+        return null;
+    }
 }
 
 // Checks the length, then converts to mono AAC in an .m4a file, which plays in
@@ -256,6 +338,7 @@ export async function processVoice(
         }
 
         const body = await readFile(outputPath);
+        const waveform = await computeWaveform(outputPath, workDir);
 
         return {
             type: "audio",
@@ -265,6 +348,7 @@ export async function processVoice(
             width: null,
             height: null,
             durationSeconds: Math.max(1, Math.round(duration)),
+            waveform,
             sha256: sha256(body),
         };
     } finally {

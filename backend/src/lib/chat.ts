@@ -49,6 +49,9 @@ export type ChatMedia = {
     width: number | null;
     height: number | null;
     durationSeconds: number | null;
+    // Voice notes: about 48 loudness values (0 to 255) for the player's bars.
+    // null for photos and for voice notes sent before this existed.
+    waveform: number[] | null;
 };
 
 // The quote shown above a reply, as one viewer sees it. `body` is a short text
@@ -486,6 +489,7 @@ export async function buildChatMedia(row: {
     width: number | null;
     height: number | null;
     durationSeconds: number | null;
+    waveform?: number[] | null;
 }): Promise<ChatMedia> {
     const [url, thumbUrl] = await Promise.all([
         signChatUrl(row.key),
@@ -498,6 +502,7 @@ export async function buildChatMedia(row: {
         width: row.width,
         height: row.height,
         durationSeconds: row.durationSeconds,
+        waveform: row.waveform ?? null,
     };
 }
 
@@ -597,6 +602,7 @@ export async function sendAttachment(
                 width: processed.width,
                 height: processed.height,
                 durationSeconds: processed.durationSeconds,
+                waveform: processed.waveform,
                 sha256: processed.sha256,
                 status: "ready",
             })
@@ -647,6 +653,7 @@ export async function sendAttachment(
             width: processed.width,
             height: processed.height,
             durationSeconds: processed.durationSeconds,
+            waveform: processed.waveform,
         }),
         createdAt: saved.createdAt,
         replyTo,

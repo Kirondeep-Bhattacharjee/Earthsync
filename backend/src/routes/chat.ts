@@ -405,6 +405,7 @@ router.get(
                     mediaWidth: media.width,
                     mediaHeight: media.height,
                     mediaDuration: media.durationSeconds,
+                    mediaWaveform: media.waveform,
                     status: statusSql(mutual, peer.delivered, peer.read),
                     replyId: original.id,
                     replyConversationId: original.conversationId,
@@ -499,6 +500,7 @@ router.get(
                                   width: row.mediaWidth,
                                   height: row.mediaHeight,
                                   durationSeconds: row.mediaDuration,
+                                  waveform: row.mediaWaveform,
                               })
                             : null,
                         row.status,
