@@ -340,14 +340,19 @@ export const messages = pgTable(
         // on every read path hides the message; the retention job deletes the
         // content later.
         expiresAt: timestamp("expires_at"),
+        // Set by the retention worker when it wipes the content of an expired
+        // message (text, media). The row stays as an empty tombstone so ids,
+        // receipts and replies that quoted it keep working. Never shown.
+        contentPurgedAt: timestamp("content_purged_at"),
         createdAt: timestamp("created_at").defaultNow().notNull(),
     },
     (t) => [
         // Text needs a body (plain or encrypted); image and voice need media.
-        // A message deleted for everyone is exempt, so its content can be purged.
+        // A message deleted for everyone, or already purged by the retention
+        // worker, is exempt, so its content can be wiped.
         check(
             "messages_content",
-            sql`${t.deletedForEveryoneAt} IS NOT NULL OR (${t.kind} = 'text' AND (${t.body} IS NOT NULL OR ${t.bodyEnc} IS NOT NULL)) OR (${t.kind} <> 'text' AND ${t.mediaId} IS NOT NULL)`
+            sql`${t.deletedForEveryoneAt} IS NOT NULL OR ${t.contentPurgedAt} IS NOT NULL OR (${t.kind} = 'text' AND (${t.body} IS NOT NULL OR ${t.bodyEnc} IS NOT NULL)) OR (${t.kind} <> 'text' AND ${t.mediaId} IS NOT NULL)`
         ),
         // An encrypted body always says which key encrypted it.
         check(

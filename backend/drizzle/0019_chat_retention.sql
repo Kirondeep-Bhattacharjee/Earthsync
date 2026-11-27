@@ -1,0 +1,3 @@
+ALTER TABLE "messages" DROP CONSTRAINT "messages_content";--> statement-breakpoint
+ALTER TABLE "messages" ADD COLUMN "content_purged_at" timestamp;--> statement-breakpoint
+ALTER TABLE "messages" ADD CONSTRAINT "messages_content" CHECK ("messages"."deleted_for_everyone_at" IS NOT NULL OR "messages"."content_purged_at" IS NOT NULL OR ("messages"."kind" = 'text' AND ("messages"."body" IS NOT NULL OR "messages"."body_enc" IS NOT NULL)) OR ("messages"."kind" <> 'text' AND "messages"."media_id" IS NOT NULL));

@@ -134,6 +134,13 @@
       "when": 1795692729098,
       "tag": "0018_chat_disappearing",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795758057655,
+      "tag": "0019_chat_retention",
+      "breakpoints": true
     }
   ]
 }
